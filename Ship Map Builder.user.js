@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Ship Map Builder
 // @namespace    http://tampermonkey.net/
-// @version      3.3.1
+// @version      3.3.2
 // @description  Ship Map + SSP + YMS + Vista + FMC integration
 // @author       homziukl
 // @match        https://stem-eu.corp.amazon.com/url*
@@ -13,6 +13,7 @@
 // @grant        GM_addStyle
 // @grant        GM_setValue
 // @grant        GM_getValue
+// @connect raw.githubusercontent.com
 // @connect      trans-logistics-eu.amazon.com
 // @connect      jwmjkz3dsd.execute-api.eu-west-1.amazonaws.com
 // @connect      fc-inbound-dock-execution-service-eu-eug1-dub.dub.proxy.amazon.com
@@ -1560,6 +1561,102 @@ const RELAT = {
         if (this._autoTimer) { clearInterval(this._autoTimer); this._autoTimer = null; }
     },
 };
+// ============================================================
+// MAP MANAGER — GitHub maps + local snapshots
+// ============================================================
+const MapManager = {
+    _ghBase: 'https://raw.githubusercontent.com/homziukl/Ship-Map-Builder/main/',
+    _listKey: 'shipmap_map_list_v1',
+
+    getGhUrl(site) {
+        return `${this._ghBase}shipmap_${site.toUpperCase()}.json`;
+    },
+
+    async fetchFromGitHub(site) {
+        const url = this.getGhUrl(site);
+        console.log(`[ShipMap:Maps] 📥 Fetching: ${url}`);
+        return new Promise((resolve, reject) => {
+            GM_xmlhttpRequest({
+                method: 'GET',
+                url,
+                headers: { 'Accept': 'application/json', 'Cache-Control': 'no-cache' },
+                onload(r) {
+                    if (r.status >= 200 && r.status < 300) {
+                        try {
+                            const data = JSON.parse(r.responseText);
+                            resolve(data);
+                        } catch { reject({ message: 'Invalid JSON in response' }); }
+                    } else if (r.status === 404) {
+                        reject({ message: `Not found: shipmap_${site.toUpperCase()}.json` });
+                    } else {
+                        reject({ message: `HTTP ${r.status}` });
+                    }
+                },
+                onerror() { reject({ message: 'Network error' }); }
+            });
+        });
+    },
+
+    // ── Local snapshot management ──
+
+    getList() {
+        try {
+            const raw = GM_getValue(this._listKey, null);
+            return raw ? JSON.parse(raw) : [];
+        } catch { return []; }
+    },
+
+    _saveList(list) {
+        GM_setValue(this._listKey, JSON.stringify(list));
+    },
+
+    saveCurrent(label) {
+        const list = this.getList();
+        const key = `shipmap_snap_${Date.now()}`;
+        const data = State.exportJSON();
+        const meta = {
+            key,
+            label: label || `${CONFIG.warehouseId} — ${new Date().toLocaleString()}`,
+            site: CONFIG.warehouseId,
+            elementCount: State.elements.length,
+            savedAt: new Date().toISOString()
+        };
+        GM_setValue(key, data);
+        list.unshift(meta);
+        if (list.length > 20) {
+            const removed = list.splice(20);
+            for (const old of removed) GM_setValue(old.key, '');
+        }
+        this._saveList(list);
+        return meta;
+    },
+
+    loadSaved(key) {
+        const raw = GM_getValue(key, null);
+        if (!raw) return false;
+        return State.importJSON(raw);
+    },
+
+    deleteSaved(key) {
+        const list = this.getList().filter(m => m.key !== key);
+        this._saveList(list);
+        GM_setValue(key, '');
+    },
+
+    renameSaved(key, newLabel) {
+        const list = this.getList();
+        const item = list.find(m => m.key === key);
+        if (item) { item.label = newLabel; this._saveList(list); }
+    },
+
+    applyGitHubMap(data, mode) {
+        if (mode === 'merge') {
+            return State.mergeJSON(JSON.stringify(data));
+        } else {
+            return State.importJSON(JSON.stringify(data));
+        }
+    }
+};
 
 // ============================================================
 // SUMMARY
@@ -2308,10 +2405,49 @@ select.tsel{background:#37475a;color:#e0e0e0;border:1px solid #4a5a6a;padding:4p
 .handover-loc-table tr:hover{background:rgba(255,255,255,.03)}
 .handover-type-badge{display:inline-block;padding:2px 8px;border-radius:4px;font-size:11px;font-weight:bold;margin:2px}
 .handover-footer{padding:8px 20px;border-top:1px solid #2a3a4a;display:flex;justify-content:space-between;align-items:center;background:#0d1b2a}
+.maps-overlay{position:fixed;inset:0;z-index:10000;display:flex;align-items:flex-start;justify-content:center;padding-top:60px;background:rgba(0,0,0,0.5);backdrop-filter:blur(2px)}
+.maps-panel{background:#111827;border:2px solid #ff9900;border-radius:12px;width:480px;max-height:80vh;display:flex;flex-direction:column;overflow:hidden;box-shadow:0 12px 40px rgba(0,0,0,0.7)}
+.maps-hdr{padding:10px 16px;display:flex;justify-content:space-between;align-items:center;background:#1a2236;border-bottom:2px solid #ff9900}
+.maps-hdr h2{font-size:14px;color:#ff9900;margin:0;display:flex;align-items:center;gap:8px}
+.maps-body{flex:1;overflow-y:auto;padding:0}
+.maps-section{padding:12px 16px;border-bottom:1px solid #2a3a4a}
+.maps-section h3{font-size:11px;color:#ff9900;text-transform:uppercase;letter-spacing:.5px;margin:0 0 8px 0;display:flex;align-items:center;gap:6px}
+.maps-current{display:flex;align-items:center;gap:10px;padding:8px 12px;background:rgba(255,153,0,.08);border-radius:6px;margin-bottom:8px}
+.maps-current-site{font-size:18px;font-weight:bold;color:#ff9900;font-family:'Amazon Ember',monospace}
+.maps-current-info{font-size:11px;color:#8899aa}
+.maps-gh-row{display:flex;gap:6px;align-items:center;margin-bottom:8px}
+.maps-gh-input{flex:1;background:#0d1b2a;color:#ff9900;border:1px solid #2a3a4a;padding:6px 10px;border-radius:6px;font-size:13px;font-family:'Amazon Ember',monospace;text-transform:uppercase;font-weight:bold}
+.maps-gh-input:focus{outline:none;border-color:#ff9900}
+.maps-gh-input::placeholder{color:#3a4a5a;text-transform:none;font-weight:normal}
+.maps-status{font-size:11px;padding:6px 10px;border-radius:6px;margin-top:6px;display:none}
+.maps-status.show{display:block}
+.maps-status.ok{background:rgba(105,240,174,.1);color:#69f0ae;border:1px solid rgba(105,240,174,.2)}
+.maps-status.err{background:rgba(255,82,82,.1);color:#ff5252;border:1px solid rgba(255,82,82,.2)}
+.maps-status.info{background:rgba(79,195,247,.1);color:#4fc3f7;border:1px solid rgba(79,195,247,.2)}
+.maps-status.loading{background:rgba(255,153,0,.1);color:#ff9900;border:1px solid rgba(255,153,0,.2)}
+.maps-preview{background:#0d1b2a;border:1px solid #2a3a4a;border-radius:6px;padding:10px 12px;margin-top:8px;display:none}
+.maps-preview.show{display:block}
+.maps-preview-row{display:flex;justify-content:space-between;font-size:11px;color:#8899aa;padding:2px 0}
+.maps-preview-row b{color:#e0e0e0}
+.maps-preview-actions{display:flex;gap:6px;margin-top:8px}
+.maps-snap-item{display:flex;align-items:center;gap:8px;padding:8px 10px;border-radius:6px;margin-bottom:4px;background:rgba(0,0,0,.2);transition:.15s}
+.maps-snap-item:hover{background:rgba(255,153,0,.08)}
+.maps-snap-icon{font-size:16px;flex-shrink:0}
+.maps-snap-info{flex:1;min-width:0}
+.maps-snap-label{font-size:12px;font-weight:bold;color:#e0e0e0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.maps-snap-meta{font-size:9px;color:#5a6a7a;display:flex;gap:8px}
+.maps-snap-actions{display:flex;gap:4px;flex-shrink:0}
+.maps-save-row{display:flex;gap:6px;margin-top:8px}
+.maps-save-input{flex:1;background:#0d1b2a;color:#e0e0e0;border:1px solid #2a3a4a;padding:5px 8px;border-radius:4px;font-size:11px}
+.maps-save-input:focus{outline:none;border-color:#ff9900}
+.maps-save-input::placeholder{color:#3a4a5a}
+.maps-empty{font-size:11px;color:#5a6a7a;font-style:italic;text-align:center;padding:12px}
+.maps-footer{padding:8px 16px;border-top:1px solid #2a3a4a;display:flex;justify-content:space-between;align-items:center;background:#0d1b2a;font-size:9px;color:#5a6a7a}
 
         `);
 
-        document.body.innerHTML = `<div id="app"><div class="hdr"><h1>🚢 Ship Map — <input id="node-input" value="${CONFIG.warehouseId}" readonly maxlength="6" spellcheck="false"></h1><div style="display:flex;align-items:center;gap:12px"><button class="btn" id="b-dashboard">📺 Dashboard</button><button class="btn" id="b-summary" style="background:#0d47a1;border-color:#4fc3f7;color:#4fc3f7">📊 Summary</button><button class="btn" id="b-trend">📈 Trend</button><button class="btn" id="b-handover" style="background:#1b5e20;border-color:#4caf50;color:#69f0ae">📋 Handover</button><button class="btn" id="b-debug" title="Debug">\uD83D\uDC1B Debug</button>
+        document.body.innerHTML = `<div id="app"><div class="hdr"><h1>🚢 Ship Map — <input id="node-input" value="${CONFIG.warehouseId}" readonly maxlength="6" spellcheck="false"></h1><div style="display:flex;align-items:center;gap:12px"><button class="btn" id="b-maps" style="background:#0d47a1;border-color:#42a5f5;color:#42a5f5">🗺️ Maps</button>
+<button class="btn" id="b-dashboard">📺 Dashboard</button><button class="btn" id="b-summary" style="background:#0d47a1;border-color:#4fc3f7;color:#4fc3f7">📊 Summary</button><button class="btn" id="b-trend">📈 Trend</button><button class="btn" id="b-handover" style="background:#1b5e20;border-color:#4caf50;color:#69f0ae">📋 Handover</button><button class="btn" id="b-debug" title="Debug">\uD83D\uDC1B Debug</button>
 
 <button class="btn" id="b-exp">📤 Export</button><button class="btn" id="b-imp">📥 Import</button><button class="btn green" id="b-merge">📥+ Merge</button><button class="btn del" id="b-clr">🧹 Clear</button><div class="edit-toggle locked" id="edit-toggle"><span class="lock-icon">🔒</span><div class="switch"></div><span class="lock-label">LOCKED</span></div></div></div>
 
@@ -2425,6 +2561,7 @@ select.tsel{background:#37475a;color:#e0e0e0;border:1px solid #4a5a6a;padding:4p
         document.getElementById('b-dashboard').onclick = () => this.toggleDashboard();
                 document.getElementById('b-trend')?.addEventListener('click', () => this.openTrend());
         document.getElementById('b-handover')?.addEventListener('click', () => this.openHandover());
+        document.getElementById('b-maps')?.addEventListener('click', () => this.openMapsMenu());
 
     },
     _initVistaSubTabs() {
@@ -4171,6 +4308,312 @@ ${ymsTrailers.length ? `<div class="handover-section">
         document.addEventListener('keydown', escH);
     },
 
+    // ═══════════════════════════════════════════════════
+    // MAP MANAGER OVERLAY
+    // ═══════════════════════════════════════════════════
+
+    openMapsMenu() {
+        document.getElementById('maps-overlay')?.remove();
+
+        const overlay = document.createElement('div');
+        overlay.id = 'maps-overlay';
+        overlay.className = 'maps-overlay';
+
+        overlay.innerHTML = `<div class="maps-panel">
+            <div class="maps-hdr">
+                <h2>🗺️ Map Manager</h2>
+                <button class="summary-close" id="maps-close">✕</button>
+            </div>
+            <div class="maps-body">
+
+                <!-- Current map -->
+                <div class="maps-section">
+                    <div class="maps-current">
+                        <span class="maps-current-site">${CONFIG.warehouseId}</span>
+                        <div>
+                            <div class="maps-current-info">📦 ${State.elements.length} elements</div>
+                            <div class="maps-current-info">💾 Local storage</div>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- GitHub download -->
+                <div class="maps-section">
+                    <h3>📥 Download from GitHub</h3>
+                    <div style="font-size:10px;color:#5a6a7a;margin-bottom:8px">
+                        Fetch <code style="color:#4fc3f7">shipmap_{SITE}.json</code> from
+                        <a href="https://github.com/homziukl/Ship-Map-Builder" target="_blank" style="color:#42a5f5">repo</a>
+                    </div>
+                    <div class="maps-gh-row">
+                        <span style="font-size:12px;color:#8899aa">shipmap_</span>
+                        <input class="maps-gh-input" id="maps-gh-site" value="${CONFIG.warehouseId}"
+                               maxlength="8" spellcheck="false" placeholder="SITE">
+                        <span style="font-size:12px;color:#8899aa">.json</span>
+                        <button class="btn" id="maps-gh-fetch" style="white-space:nowrap">📥 Fetch</button>
+                    </div>
+                    <div class="maps-status" id="maps-gh-status"></div>
+                    <div class="maps-preview" id="maps-gh-preview">
+                        <div style="font-size:10px;color:#ff9900;font-weight:bold;margin-bottom:6px">📋 Preview</div>
+                        <div id="maps-gh-preview-info"></div>
+                        <div class="maps-preview-actions">
+                            <button class="btn green" id="maps-gh-apply-replace">🔄 Replace current</button>
+                            <button class="btn cyan" id="maps-gh-apply-merge">📥+ Merge</button>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Saved snapshots -->
+                <div class="maps-section">
+                    <h3>💾 Saved Maps <span style="font-size:9px;color:#5a6a7a;font-weight:normal">(local snapshots)</span></h3>
+                    <div id="maps-snap-list"></div>
+                    <div class="maps-save-row">
+                        <input class="maps-save-input" id="maps-save-label"
+                               placeholder="${CONFIG.warehouseId} — ${new Date().toLocaleDateString()}" spellcheck="false">
+                        <button class="btn green" id="maps-save-btn">💾 Save</button>
+                    </div>
+                </div>
+
+            </div>
+            <div class="maps-footer">
+                <span>GitHub: homziukl/Ship-Map-Builder</span>
+                <span>v3.3.1</span>
+            </div>
+        </div>`;
+
+        document.body.appendChild(overlay);
+
+        // ── State ──
+        let fetchedData = null;
+
+        // ── Close ──
+        document.getElementById('maps-close').onclick = () => overlay.remove();
+        overlay.addEventListener('click', (e) => { if (e.target === overlay) overlay.remove(); });
+
+        // ── Prevent keyboard propagation ──
+        overlay.querySelectorAll('input').forEach(inp => {
+            inp.addEventListener('keydown', (e) => {
+                e.stopPropagation();
+                if (e.key === 'Escape') overlay.remove();
+                if (e.key === 'Enter' && inp.id === 'maps-gh-site') document.getElementById('maps-gh-fetch').click();
+                if (e.key === 'Enter' && inp.id === 'maps-save-label') document.getElementById('maps-save-btn').click();
+            });
+        });
+
+        // ── GitHub Fetch ──
+        const setStatus = (msg, cls) => {
+            const el = document.getElementById('maps-gh-status');
+            el.textContent = msg;
+            el.className = `maps-status show ${cls}`;
+        };
+
+        const hideStatus = () => {
+            document.getElementById('maps-gh-status').className = 'maps-status';
+        };
+
+        const showPreview = (data, site) => {
+            const info = document.getElementById('maps-gh-preview-info');
+            const elCount = data.elements?.length || 0;
+            const typeCount = data.types ? Object.keys(data.types).length : 0;
+            const hasBg = !!data.bgUrl;
+            const exportedAt = data.exportedAt ? new Date(data.exportedAt).toLocaleString() : '—';
+            const version = data.version || '?';
+
+            info.innerHTML = `
+                <div class="maps-preview-row"><span>Site</span><b>${data.warehouse || site}</b></div>
+                <div class="maps-preview-row"><span>Elements</span><b>${elCount}</b></div>
+                <div class="maps-preview-row"><span>Types</span><b>${typeCount}</b></div>
+                <div class="maps-preview-row"><span>BG image</span><b>${hasBg ? '✅ Yes' : '—'}</b></div>
+                <div class="maps-preview-row"><span>Exported</span><b>${exportedAt}</b></div>
+                <div class="maps-preview-row"><span>Version</span><b>${version}</b></div>
+            `;
+            document.getElementById('maps-gh-preview').classList.add('show');
+        };
+
+        const hidePreview = () => {
+            document.getElementById('maps-gh-preview').classList.remove('show');
+            fetchedData = null;
+        };
+
+        document.getElementById('maps-gh-fetch').addEventListener('click', async () => {
+            const site = document.getElementById('maps-gh-site').value.trim().toUpperCase();
+            if (!site || site.length < 2) { setStatus('⚠️ Enter a valid site code', 'err'); return; }
+
+            hidePreview();
+            setStatus('⏳ Fetching...', 'loading');
+            document.getElementById('maps-gh-fetch').disabled = true;
+
+            try {
+                const data = await MapManager.fetchFromGitHub(site);
+                fetchedData = data;
+
+                const elCount = data.elements?.length || 0;
+                if (!elCount) {
+                    setStatus(`⚠️ File found but contains 0 elements`, 'err');
+                    hidePreview();
+                } else {
+                    setStatus(`✅ Found: ${elCount} elements`, 'ok');
+                    showPreview(data, site);
+                }
+            } catch (err) {
+                setStatus(`❌ ${err.message}`, 'err');
+                hidePreview();
+            } finally {
+                document.getElementById('maps-gh-fetch').disabled = false;
+            }
+        });
+
+        // ── Apply: Replace ──
+        document.getElementById('maps-gh-apply-replace').addEventListener('click', () => {
+            if (!fetchedData) return;
+
+            if (!confirm(`Replace current map (${State.elements.length} elements) with GitHub map (${fetchedData.elements?.length || 0} elements)?`)) return;
+
+            // Auto-save before replacing
+            MapManager.saveCurrent(`Auto-backup before GitHub replace`);
+
+            const ok = MapManager.applyGitHubMap(fetchedData, 'replace');
+            if (ok) {
+                UI.setStatus(`✅ Map replaced: ${State.elements.length} elements from GitHub`);
+                UI._initLegend();
+                UI._initType();
+                UI.refreshList();
+                R.render();
+                setStatus(`✅ Applied! ${State.elements.length} elements loaded`, 'ok');
+                hidePreview();
+                this._renderSnapList();
+            } else {
+                setStatus('❌ Failed to apply map', 'err');
+            }
+        });
+
+        // ── Apply: Merge ──
+        document.getElementById('maps-gh-apply-merge').addEventListener('click', () => {
+            if (!fetchedData) return;
+
+            const result = MapManager.applyGitHubMap(fetchedData, 'merge');
+            if (result) {
+                UI.setStatus(`✅ Merged: +${result.added} elements (${result.skipped} skipped)`);
+                UI._initLegend();
+                UI._initType();
+                UI.refreshList();
+                R.render();
+                setStatus(`✅ Merged! +${result.added} new, ${result.skipped} skipped`, 'ok');
+                hidePreview();
+            } else {
+                setStatus('❌ Failed to merge map', 'err');
+            }
+        });
+
+        // ── Save current ──
+        document.getElementById('maps-save-btn').addEventListener('click', () => {
+            const label = document.getElementById('maps-save-label').value.trim() ||
+                          `${CONFIG.warehouseId} — ${new Date().toLocaleString()}`;
+
+            const meta = MapManager.saveCurrent(label);
+            document.getElementById('maps-save-label').value = '';
+            UI.setStatus(`💾 Map saved: "${meta.label}"`);
+            this._renderSnapList();
+        });
+
+        // ── Render snapshot list ──
+        this._renderSnapList();
+    },
+
+    _renderSnapList() {
+        const container = document.getElementById('maps-snap-list');
+        if (!container) return;
+
+        const list = MapManager.getList();
+
+        if (!list.length) {
+            container.innerHTML = '<div class="maps-empty">No saved maps yet — click 💾 Save</div>';
+            return;
+        }
+
+        container.innerHTML = list.map((m, idx) => {
+            const date = m.savedAt ? new Date(m.savedAt) : null;
+            const dateStr = date ? `${date.getDate().toString().padStart(2,'0')}/${(date.getMonth()+1).toString().padStart(2,'0')} ${date.getHours().toString().padStart(2,'0')}:${date.getMinutes().toString().padStart(2,'0')}` : '—';
+            const isAutoBackup = m.label.startsWith('Auto-backup');
+
+            return `<div class="maps-snap-item" data-snap-idx="${idx}">
+                <span class="maps-snap-icon">${isAutoBackup ? '🔄' : '🗺️'}</span>
+                <div class="maps-snap-info">
+                    <div class="maps-snap-label" title="${m.label}">${m.label}</div>
+                    <div class="maps-snap-meta">
+                        <span>📦 ${m.elementCount || '?'} el</span>
+                        <span>🏢 ${m.site || '?'}</span>
+                        <span>📅 ${dateStr}</span>
+                    </div>
+                </div>
+                <div class="maps-snap-actions">
+                    <button class="btn sm green" data-snap-load="${m.key}" title="Load this map">📂</button>
+                    <button class="btn sm" data-snap-export="${m.key}" title="Export as file">📤</button>
+                    <button class="btn sm del" data-snap-del="${m.key}" title="Delete">✕</button>
+                </div>
+            </div>`;
+        }).join('');
+
+        // ── Load ──
+        container.querySelectorAll('[data-snap-load]').forEach(btn => {
+            btn.addEventListener('click', (e) => {
+                e.stopPropagation();
+                const key = btn.dataset.snapLoad;
+                const meta = list.find(m => m.key === key);
+
+                if (!confirm(`Load "${meta?.label}"?\nThis will replace current map (${State.elements.length} elements).`)) return;
+
+                // Auto-save before loading
+                MapManager.saveCurrent(`Auto-backup before loading "${meta?.label}"`);
+
+                const ok = MapManager.loadSaved(key);
+                if (ok) {
+                    UI.setStatus(`✅ Loaded: "${meta?.label}"`);
+                    UI._initLegend();
+                    UI._initType();
+                    UI.refreshList();
+                    R.render();
+                    this._renderSnapList();
+
+                    // Update current map info
+                    const currentSite = document.querySelector('.maps-current-site');
+                    const currentInfo = document.querySelector('.maps-current-info');
+                    if (currentSite) currentSite.textContent = CONFIG.warehouseId;
+                    if (currentInfo) currentInfo.textContent = `📦 ${State.elements.length} elements`;
+                } else {
+                    UI.setStatus('❌ Failed to load map');
+                }
+            });
+        });
+
+        // ── Export ──
+        container.querySelectorAll('[data-snap-export]').forEach(btn => {
+            btn.addEventListener('click', (e) => {
+                e.stopPropagation();
+                const key = btn.dataset.snapExport;
+                const raw = GM_getValue(key, null);
+                if (!raw) return;
+                const meta = list.find(m => m.key === key);
+                const blob = new Blob([raw], { type: 'application/json' });
+                const a = document.createElement('a');
+                a.href = URL.createObjectURL(blob);
+                a.download = `shipmap_${meta?.site || CONFIG.warehouseId}.json`;
+                a.click();
+            });
+        });
+
+        // ── Delete ──
+        container.querySelectorAll('[data-snap-del]').forEach(btn => {
+            btn.addEventListener('click', (e) => {
+                e.stopPropagation();
+                const key = btn.dataset.snapDel;
+                const meta = list.find(m => m.key === key);
+                if (!confirm(`Delete "${meta?.label}"?`)) return;
+                MapManager.deleteSaved(key);
+                this._renderSnapList();
+                UI.setStatus(`🗑️ Deleted: "${meta?.label}"`);
+            });
+        });
+    },
 
 printStages() {
 
@@ -4472,9 +4915,10 @@ function bootMain() {
     UI.refreshList();
     UI.setStatus(`✅ v3.3.1 | ${State.elements.length} el | ${State.editMode ? '🔓' : '🔒'}`);
     try { Minimap.init(); } catch(e) { console.warn('[Minimap] init failed:', e); }
-        try { unsafeWindow.__SM = { State, YMS, FMC, Dockmaster, RELAT, MatchIndex, ymsGetVrIds }; } catch(e) {}
-    try { window.__SM = { State, YMS, FMC, Dockmaster, RELAT, MatchIndex, ymsGetVrIds }; } catch(e) {}
-    try { document.__SM = { State, YMS, FMC, Dockmaster, RELAT, MatchIndex, ymsGetVrIds }; } catch(e) {}
+try { unsafeWindow.__SM = { State, YMS, FMC, Dockmaster, RELAT, MapManager, MatchIndex, ymsGetVrIds }; } catch(e) {}
+try { window.__SM = { State, YMS, FMC, Dockmaster, RELAT, MapManager, MatchIndex, ymsGetVrIds }; } catch(e) {}
+try { document.__SM = { State, YMS, FMC, Dockmaster, RELAT, MapManager, MatchIndex, ymsGetVrIds }; } catch(e) {}
+
 
 
 
