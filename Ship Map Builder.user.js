@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Ship Map Builder
 // @namespace    http://tampermonkey.net/
-// @version      3.3.2
+// @version      3.3.3
 // @description  Ship Map + SSP + YMS + Vista + FMC integration
 // @author       homziukl
 // @match        https://stem-eu.corp.amazon.com/url*
@@ -327,6 +327,11 @@ function ymsGetNonInvAssets() {
 
 const TRAILER_LABELS = { 'TRAILER':'🚛', 'SWAP_BODY':'🔀', 'TRAILER_REFRIGERATED':'❄️', 'TRAILER_SOFT':'📦', 'TRAILER_SKIRTED':'🚛', 'BOX_TRUCK':'📦', 'SPRINTER_VAN':'🚐', 'THREE_WHEELER':'🛺', 'TRACTOR':'🚜', 'SEVEN_HALF_TON_TRUCK':'🚚' };
 const TRAILER_ICONS = { 'TRAILER':{ symbol:'🚛', label:'TRL' }, 'SWAP_BODY':{ symbol:'🔀', label:'SWAP' }, 'TRAILER_REFRIGERATED':{ symbol:'❄️', label:'REF' }, 'TRAILER_SOFT':{ symbol:'📦', label:'SOFT' }, 'TRAILER_SKIRTED':{ symbol:'🚛', label:'SKRT' }, 'BOX_TRUCK':{ symbol:'📦', label:'BOX' }, 'SPRINTER_VAN':{ symbol:'🚐', label:'SPR' }, 'THREE_WHEELER':{ symbol:'🛺', label:'3WH' }, 'TRACTOR':{ symbol:'🚜', label:'TRC' }, 'SEVEN_HALF_TON_TRUCK':{ symbol:'🚚', label:'7.5t' } };
+// ── FOCUS MODE PALETTE ──────────────────────────────
+const FOCUS_PALETTE = [
+    '#FF6B6B', '#4ECDC4', '#FFE66D', '#A8E6CF', '#FF8A5C',
+    '#6C5CE7', '#81ECEC', '#FDCB6E', '#E17055', '#00B894',
+];
 
 function routeGroupKey(rawRoute) { let s = rawRoute.replace(/^[A-Z0-9]+->/i, ''); s = s.replace(/-(?:VCRI|DDU|ND)$/i, ''); return s.toUpperCase(); }
 function routeSubLabel(rawRoute) { const s = rawRoute.replace(/^[A-Z0-9]+->/i, ''); const group = routeGroupKey(rawRoute); if (s.toUpperCase() === group) return null; const diff = s.toUpperCase().replace(group, '').replace(/^-/, ''); return diff || null; }
@@ -410,6 +415,49 @@ const State = {
     mapSearch: '', mapSearchMatches: new Set(),
     hideOldDeparted: true, oldDepartedMinutes: 60,
     dashboardMode: false,
+    // ── Focus Mode ──
+    focusRoutes: new Map(),   // routeGroupKey → { color }
+    _focusColorIdx: 0,
+
+    toggleFocusRoute(rawRoute) {
+        const gKey = routeGroupKey(rawRoute);
+        if (this.focusRoutes.has(gKey)) {
+            this.focusRoutes.delete(gKey);
+        } else {
+            const color = FOCUS_PALETTE[this._focusColorIdx % FOCUS_PALETTE.length];
+            this._focusColorIdx++;
+            this.focusRoutes.set(gKey, { color });
+        }
+    },
+
+    clearFocus() {
+        this.focusRoutes.clear();
+        this._focusColorIdx = 0;
+    },
+
+    isFocusRoute(rawRoute) {
+        return this.focusRoutes.has(routeGroupKey(rawRoute));
+    },
+
+    getFocusForElement(el) {
+        if (!this.focusRoutes.size) return null;
+        const elKey = el.name || el.id;
+        const vd = this.vistaElementMap?.[elKey];
+        if (!vd?.routes) return null;
+
+        const matches = {};
+        for (const [vRoute, vData] of Object.entries(vd.routes)) {
+            const gKey = routeGroupKey(vRoute);
+            if (this.focusRoutes.has(gKey)) {
+                const fr = this.focusRoutes.get(gKey);
+                if (!matches[gKey]) matches[gKey] = { color: fr.color, count: 0, pkgs: 0 };
+                matches[gKey].count += vData.count;
+                matches[gKey].pkgs += vData.pkgs;
+            }
+        }
+
+        return Object.keys(matches).length ? matches : null;
+    },
 
     get selectedElements() { return this.elements.filter(el => this.selectedIds.has(el.id)); },
     get primarySelected() { const a = this.selectedElements; return a.length ? a[a.length - 1] : null; },
@@ -1863,7 +1911,15 @@ const Minimap = {
             const ex = tx(el.x), ey = ty(el.y); const ew = Math.max(1, el.w * scale); const eh = Math.max(1, el.h * scale);
             const elKey = el.name || el.id; let fillColor = t.color;
             if (State.vistaEnabled) { const level = VISTA.getCongestionLevel(elKey); if (level) { const vc = VISTA.getCongestionColor(level); if (vc) fillColor = vc.fill; } }
-            if (State.isHighlighted(el)) fillColor = '#FFD700';
+                    if (State.isHighlighted(el)) fillColor = '#FFD700';
+        else if (State.focusRoutes.size > 0) {
+            const fd = State.getFocusForElement(el);
+            if (fd) {
+                const dominant = Object.values(fd).sort((a, b) => b.count - a.count)[0];
+                fillColor = dominant.color;
+            }
+        }
+
             ctx.fillStyle = fillColor; ctx.globalAlpha = State.isHighlighted(el) ? 0.95 : 0.7; ctx.fillRect(ex, ey, ew, eh);
         }
         ctx.globalAlpha = 1;
@@ -1924,47 +1980,191 @@ const R = {
                            ctx.restore();
 
     },
-    _drawElements() {
-        const { ctx } = this, hasHL = Object.keys(State.highlightData).length > 0, hasSearch = State.mapSearch && State.mapSearchMatches.size > 0;
-        for (const el of State.elements) {
-            const t = ELEMENT_TYPES[el.type]; if (!t) continue;
-            const isSel = State.isSelected(el), isHov = State.hoveredElement?.id === el.id, isDel = State.mode === MODE.DELETE && State.editMode;
-            const isHL = State.isHighlighted(el), hl = State.getHighlight(el), dimmed = hasHL && !isHL, isLoose = isHL && hl?.onlyLoose;
-            const ymsOv = (!isHL && !dimmed) ? this._getYmsColor(el) : null;
-            const isYmsOnly = isHL && hl?.ymsMatch && !hl?.totalPkgs && !hl?.loosePkgs && Object.keys(hl?.containers||{}).length === 0;
-            const hlFill = isLoose ? '#78909C' : (isYmsOnly ? '#4fc3f7' : '#FFD700'), hlBrd = isLoose ? '#546E7A' : (isYmsOnly ? '#0288d1' : '#DAA520'), hlGlw = isLoose ? '#78909C' : (isYmsOnly ? '#4fc3f7' : '#FFD700');
-            const isSearchMatch = hasSearch && State.mapSearchMatches.has(el.id), searchDimmed = hasSearch && !isSearchMatch;
-            let fillC, brdC; if (isHL) { fillC = hlFill; brdC = hlBrd; } else if (ymsOv) { fillC = ymsOv.fill; brdC = ymsOv.border; } else { fillC = t.color; brdC = t.border; }
-            if (isSel || isHov || isHL || isSearchMatch) { ctx.shadowColor = isDel && isHov ? '#ff1744' : (isSearchMatch && !isHL ? '#42a5f5' : (isHL ? hlGlw : (ymsOv ? ymsOv.glow : t.color))); ctx.shadowBlur = isHL ? (isLoose ? 6 : (12 + Math.sin(State.highlightPulse*Math.PI*2)*8)) : (isSearchMatch ? 14 : (isSel ? 20 : 10)); } else if (ymsOv) { ctx.shadowColor = ymsOv.glow; ctx.shadowBlur = 8; }
-            ctx.globalAlpha = (dimmed || searchDimmed) ? 0.15 : (isDel && isHov ? 0.5 : (isHL ? (isLoose ? 0.65 : 0.95) : (ymsOv ? 0.9 : 0.85))); if (isSearchMatch && !isHL) ctx.globalAlpha = 1;
-            ctx.fillStyle = isDel && isHov ? 'rgba(255,23,68,0.4)' : fillC; ctx.fillRect(el.x, el.y, el.w, el.h);
-            ctx.globalAlpha = 1; ctx.strokeStyle = isSel ? '#ffffff' : ((dimmed || searchDimmed) ? 'rgba(255,255,255,0.1)' : (isSearchMatch ? '#42a5f5' : brdC));
-            ctx.lineWidth = (isHL || ymsOv || isSearchMatch) ? 3 : (isSel ? 2.5 : 1); if (isSel && !isHL) ctx.setLineDash([6, 3]);
-            ctx.strokeRect(el.x, el.y, el.w, el.h); ctx.setLineDash([]); ctx.shadowColor = 'transparent'; ctx.shadowBlur = 0;
-            // Labels
-            if (el.w >= 50 && el.h >= 18) {
-                ctx.save(); ctx.globalAlpha = (dimmed || searchDimmed) ? 0.3 : 1;
-                const headerH = el.chute && el.h >= 32 ? 26 : 16;
-                ctx.fillStyle = isHL ? (isLoose ? 'rgba(0,0,0,0.45)' : 'rgba(0,0,0,0.7)') : 'rgba(0,0,0,0.5)'; ctx.fillRect(el.x, el.y, el.w, headerH);
-                ctx.fillStyle = isHL ? (isLoose ? '#cfd8dc' : '#000') : '#fff'; ctx.font = 'bold 10px "Amazon Ember",Arial,sans-serif'; ctx.textAlign = 'left'; ctx.textBaseline = 'middle';
-                let txt = el.name || el.id; const mw = el.w - 6; if (ctx.measureText(txt).width > mw) { while (txt.length > 1 && ctx.measureText(txt+'…').width > mw) txt = txt.slice(0,-1); txt += '…'; } ctx.fillText(txt, el.x+4, el.y+8);
-                if (el.chute && el.h >= 32) { ctx.font = '8px "Amazon Ember",Arial,sans-serif'; ctx.fillStyle = isHL ? '#90caf9' : '#82b1ff'; let ct = el.chute; if (ctx.measureText(ct).width > mw) { const parts = ct.split('-'); ct = parts[parts.length-1]||ct; } if (ctx.measureText(ct).width > mw) { while (ct.length > 1 && ctx.measureText(ct+'…').width > mw) ct = ct.slice(0,-1); ct += '…'; } ctx.fillText(ct, el.x+4, el.y+20); }
-                if (!isHL && !dimmed && !searchDimmed && el.w >= 40 && el.h >= 40) { const ymsLoc = State.getYmsForElement(el); this._drawTrailerIcon(ctx, el, ymsLoc); }
-                else if (!isHL && !dimmed && !searchDimmed && el.w >= 60 && el.h >= 32) { const ymsLoc = State.getYmsForElement(el); if (ymsLoc?.yardAssets?.length) { const trailer = ymsLoc.yardAssets.find(a => a.type !== 'TRACTOR'); if (trailer) { const icon = TRAILER_LABELS[trailer.type] || '🚛'; const sts = trailer.status === 'IN_PROGRESS' ? '⏳' : (trailer.status === 'FULL' ? '📦' : (trailer.status === 'EMPTY' ? '∅' : '')); const yLine = el.chute ? (el.h >= 44 ? el.y + 36 : el.y + 20) : (el.h >= 30 ? el.y + 22 : null); if (yLine) { ctx.font = 'bold 8px "Amazon Ember",Arial,sans-serif'; ctx.fillStyle = ymsOv ? '#fff' : '#b0bec5'; ctx.fillText(`${icon}${sts}`, el.x + 4, yLine); } } } }
-                if (!isHL && !dimmed && !searchDimmed && el.w >= 60 && el.h >= 28) { const vd = State.vistaElementMap?.[el.name || el.id]; if (vd && vd.totalContainers > 0) { const TS2 = {'PALLET':'🛒','GAYLORD':'📫','CART':'🛒','BAG':'👜'}; const summary = Object.entries(vd.types).map(([tp,n]) => `${n}${TS2[tp]||''}`).join(''); const yBase = el.chute ? (el.h >= 52 ? el.y + 44 : el.y + 28) : (el.h >= 38 ? el.y + 28 : null); if (yBase) { ctx.font = 'bold 8px "Amazon Ember",Arial,sans-serif'; const level = VISTA.getCongestionLevel(el.name || el.id); ctx.fillStyle = level === 'critical' ? '#ff1744' : level === 'high' ? '#ff9100' : level === 'medium' ? '#ffd600' : '#69f0ae'; const effMax = getEffectiveMaxContainers(el.name || el.id); const ratioText = effMax.max > 0 ? `${vd.totalContainers}/${effMax.max}` : '';                 ctx.fillText(`📦${summary}${ratioText ? ' '+ratioText : ''}`, el.x + 4, yBase); } } }
+_drawElements() {
 
-                if (isLoose && el.h >= (el.chute ? 44 : 30)) {
-                    ctx.font = 'bold 8px "Amazon Ember",Arial,sans-serif';
-                    ctx.fillStyle = '#90a4ae';
-                    ctx.fillText('📬 dwell', el.x+4, el.y+(el.chute ? 36 : 24));
-                }
+    const { ctx } = this, hasHL = Object.keys(State.highlightData).length > 0, hasSearch = State.mapSearch && State.mapSearchMatches.size > 0;
 
-                ctx.restore();
+    for (const el of State.elements) {
 
-            }
-            if (isSel && State.selectedIds.size === 1 && State.mode === MODE.SELECT && State.editMode) { for (const h of this._handles(el)) { ctx.fillStyle = '#fff'; ctx.fillRect(h.x-3, h.y-3, 6, 6); ctx.strokeStyle = '#000'; ctx.lineWidth = 1; ctx.strokeRect(h.x-3, h.y-3, 6, 6); } }
+        const t = ELEMENT_TYPES[el.type]; if (!t) continue;
+
+        const isSel = State.isSelected(el), isHov = State.hoveredElement?.id === el.id, isDel = State.mode === MODE.DELETE && State.editMode;
+
+        const isHL = State.isHighlighted(el), hl = State.getHighlight(el);
+
+        const isLoose = isHL && hl?.onlyLoose;
+
+        // ── Focus mode ──
+        const hasFocus = State.focusRoutes.size > 0;
+        const focusData = (!isHL && hasFocus) ? State.getFocusForElement(el) : null;
+        const focusEntries = focusData ? Object.entries(focusData).sort((a, b) => b[1].count - a[1].count) : null;
+        const focusDominant = focusEntries ? focusEntries[0] : null;
+
+        const dimmed = !isHL && (hasHL || (hasFocus && !focusData));
+
+        const ymsOv = (!isHL && !dimmed && !focusData) ? this._getYmsColor(el) : null;
+
+        const isYmsOnly = isHL && hl?.ymsMatch && !hl?.totalPkgs && !hl?.loosePkgs && Object.keys(hl?.containers || {}).length === 0;
+
+        const hlFill = isLoose ? '#78909C' : (isYmsOnly ? '#4fc3f7' : '#FFD700'),
+              hlBrd  = isLoose ? '#546E7A' : (isYmsOnly ? '#0288d1' : '#DAA520'),
+              hlGlw  = isLoose ? '#78909C' : (isYmsOnly ? '#4fc3f7' : '#FFD700');
+
+        const isSearchMatch = hasSearch && State.mapSearchMatches.has(el.id),
+              searchDimmed  = hasSearch && !isSearchMatch;
+
+        // ── Fill / border color ──
+        let fillC, brdC;
+        if (isHL) { fillC = hlFill; brdC = hlBrd; }
+        else if (focusDominant) { fillC = focusDominant[1].color; brdC = darkenColor(focusDominant[1].color); }
+        else if (ymsOv) { fillC = ymsOv.fill; brdC = ymsOv.border; }
+        else { fillC = t.color; brdC = t.border; }
+
+        // ── Focus glow ──
+        if (focusDominant && !isHL) {
+            ctx.shadowColor = focusDominant[1].color;
+            ctx.shadowBlur = 12;
         }
-    },
+
+        // ── Highlight / selection glow ──
+        if (isSel || isHov || isHL || isSearchMatch) {
+            ctx.shadowColor = isDel && isHov ? '#ff1744' : (isSearchMatch && !isHL ? '#42a5f5' : (isHL ? hlGlw : (ymsOv ? ymsOv.glow : t.color)));
+            ctx.shadowBlur = isHL ? (isLoose ? 6 : (12 + Math.sin(State.highlightPulse * Math.PI * 2) * 8)) : (isSearchMatch ? 14 : (isSel ? 20 : 10));
+        } else if (ymsOv && !focusDominant) {
+            ctx.shadowColor = ymsOv.glow;
+            ctx.shadowBlur = 8;
+        }
+
+        // ── Fill rect ──
+        ctx.globalAlpha = (dimmed || searchDimmed) ? 0.12 : (isDel && isHov ? 0.5 : (isHL ? (isLoose ? 0.65 : 0.95) : (focusDominant ? 0.9 : (ymsOv ? 0.9 : 0.85))));
+        if (isSearchMatch && !isHL) ctx.globalAlpha = 1;
+
+        ctx.fillStyle = isDel && isHov ? 'rgba(255,23,68,0.4)' : fillC;
+        ctx.fillRect(el.x, el.y, el.w, el.h);
+
+        // ── Stroke ──
+        ctx.globalAlpha = 1;
+        ctx.strokeStyle = isSel ? '#ffffff' : ((dimmed || searchDimmed) ? 'rgba(255,255,255,0.1)' : (isSearchMatch ? '#42a5f5' : brdC));
+
+        ctx.lineWidth = (isHL || ymsOv || isSearchMatch || focusDominant) ? 3 : (isSel ? 2.5 : 1);
+        if (isSel && !isHL) ctx.setLineDash([6, 3]);
+
+        ctx.strokeRect(el.x, el.y, el.w, el.h);
+        ctx.setLineDash([]);
+        ctx.shadowColor = 'transparent';
+        ctx.shadowBlur = 0;
+
+        // ── Labels ──
+        if (el.w >= 50 && el.h >= 18) {
+
+            ctx.save();
+            ctx.globalAlpha = (dimmed || searchDimmed) ? 0.3 : 1;
+
+            const headerH = el.chute && el.h >= 32 ? 26 : 16;
+
+            // Header bg
+            ctx.fillStyle = isHL ? (isLoose ? 'rgba(0,0,0,0.45)' : 'rgba(0,0,0,0.7)') : (focusDominant ? 'rgba(0,0,0,0.65)' : 'rgba(0,0,0,0.5)');
+            ctx.fillRect(el.x, el.y, el.w, headerH);
+
+            // Name
+            ctx.fillStyle = isHL ? (isLoose ? '#cfd8dc' : '#000') : '#fff';
+            ctx.font = 'bold 10px "Amazon Ember",Arial,sans-serif';
+            ctx.textAlign = 'left';
+            ctx.textBaseline = 'middle';
+
+            let txt = el.name || el.id;
+            const mw = el.w - 6;
+            if (ctx.measureText(txt).width > mw) { while (txt.length > 1 && ctx.measureText(txt + '…').width > mw) txt = txt.slice(0, -1); txt += '…'; }
+            ctx.fillText(txt, el.x + 4, el.y + 8);
+
+            // Chute
+            if (el.chute && el.h >= 32) {
+                ctx.font = '8px "Amazon Ember",Arial,sans-serif';
+                ctx.fillStyle = isHL ? '#90caf9' : '#82b1ff';
+                let ct = el.chute;
+                if (ctx.measureText(ct).width > mw) { const parts = ct.split('-'); ct = parts[parts.length - 1] || ct; }
+                if (ctx.measureText(ct).width > mw) { while (ct.length > 1 && ctx.measureText(ct + '…').width > mw) ct = ct.slice(0, -1); ct += '…'; }
+                ctx.fillText(ct, el.x + 4, el.y + 20);
+            }
+
+            // ── Trailer icon (no highlight, no dim, no focus) ──
+            if (!isHL && !dimmed && !searchDimmed && !focusData && el.w >= 40 && el.h >= 40) {
+                const ymsLoc = State.getYmsForElement(el);
+                this._drawTrailerIcon(ctx, el, ymsLoc);
+            }
+
+            // ── Small trailer label (no highlight, no dim, no focus) ──
+            else if (!isHL && !dimmed && !searchDimmed && !focusData && el.w >= 60 && el.h >= 32) {
+                const ymsLoc = State.getYmsForElement(el);
+                if (ymsLoc?.yardAssets?.length) {
+                    const trailer = ymsLoc.yardAssets.find(a => a.type !== 'TRACTOR');
+                    if (trailer) {
+                        const icon = TRAILER_LABELS[trailer.type] || '🚛';
+                        const sts = trailer.status === 'IN_PROGRESS' ? '⏳' : (trailer.status === 'FULL' ? '📦' : (trailer.status === 'EMPTY' ? '∅' : ''));
+                        const yLine = el.chute ? (el.h >= 44 ? el.y + 36 : el.y + 20) : (el.h >= 30 ? el.y + 22 : null);
+                        if (yLine) {
+                            ctx.font = 'bold 8px "Amazon Ember",Arial,sans-serif';
+                            ctx.fillStyle = ymsOv ? '#fff' : '#b0bec5';
+                            ctx.fillText(`${icon}${sts}`, el.x + 4, yLine);
+                        }
+                    }
+                }
+            }
+
+            // ── Vista badge (no highlight, no dim, no focus) ──
+            if (!isHL && !dimmed && !searchDimmed && !focusData && el.w >= 60 && el.h >= 28) {
+                const vd = State.vistaElementMap?.[el.name || el.id];
+                if (vd && vd.totalContainers > 0) {
+                    const TS2 = { 'PALLET': '🛒', 'GAYLORD': '📫', 'CART': '🛒', 'BAG': '👜' };
+                    const summary = Object.entries(vd.types).map(([tp, n]) => `${n}${TS2[tp] || ''}`).join('');
+                    const yBase = el.chute ? (el.h >= 52 ? el.y + 44 : el.y + 28) : (el.h >= 38 ? el.y + 28 : null);
+                    if (yBase) {
+                        ctx.font = 'bold 8px "Amazon Ember",Arial,sans-serif';
+                        const level = VISTA.getCongestionLevel(el.name || el.id);
+                        ctx.fillStyle = level === 'critical' ? '#ff1744' : level === 'high' ? '#ff9100' : level === 'medium' ? '#ffd600' : '#69f0ae';
+                        const effMax = getEffectiveMaxContainers(el.name || el.id);
+                        const ratioText = effMax.max > 0 ? `${vd.totalContainers}/${effMax.max}` : '';
+                        ctx.fillText(`📦${summary}${ratioText ? ' ' + ratioText : ''}`, el.x + 4, yBase);
+                    }
+                }
+            }
+
+            // ── Focus mode badge ──
+            if (focusData && !isHL && !dimmed && el.w >= 60 && el.h >= 28) {
+                const focusBadge = focusEntries.map(([route, data]) => `${route}:${data.count}`).join(' ');
+                const yBase = el.chute ? (el.h >= 52 ? el.y + 44 : el.y + 28) : (el.h >= 38 ? el.y + 28 : null);
+                if (yBase) {
+                    ctx.font = 'bold 8px "Amazon Ember",Arial,sans-serif';
+                    ctx.fillStyle = focusDominant[1].color;
+                    ctx.fillText(`🎯${focusBadge}`, el.x + 4, yBase);
+                }
+            }
+
+            // ── Dwell text (loose highlight) ──
+            if (isLoose && el.h >= (el.chute ? 44 : 30)) {
+                ctx.font = 'bold 8px "Amazon Ember",Arial,sans-serif';
+                ctx.fillStyle = '#90a4ae';
+                ctx.fillText('📬 dwell', el.x + 4, el.y + (el.chute ? 36 : 24));
+            }
+
+            ctx.restore();
+        }
+
+        // ── Resize handles ──
+        if (isSel && State.selectedIds.size === 1 && State.mode === MODE.SELECT && State.editMode) {
+            for (const h of this._handles(el)) {
+                ctx.fillStyle = '#fff';
+                ctx.fillRect(h.x - 3, h.y - 3, 6, 6);
+                ctx.strokeStyle = '#000';
+                ctx.lineWidth = 1;
+                ctx.strokeRect(h.x - 3, h.y - 3, 6, 6);
+            }
+        }
+
+    }
+
+},
+
     _drawTooltip() {
         const el = State.hoveredElement; if (!el || State.bgEditMode) return;
         if (State.isMoving || State.isDrawing || State.isPanning || State.isBoxSelecting || State.isResizing) return;
@@ -2089,6 +2289,17 @@ const R = {
         if (State.vistaLastUpdated) { const t = '📦VIS', tw = ctx.measureText(t).width+20; ctx.fillStyle = 'rgba(0,0,0,0.5)'; ctx.beginPath(); ctx.roundRect(cx, c.height-42, tw, 28, 6); ctx.fill(); ctx.fillStyle = '#ff9100'; ctx.fillText(t, cx+10, c.height-28); cx += tw+10; }
 
         if (FMC.lastUpdated) { const t = `🚛FMC:${FMC.tours.length}`, tw = ctx.measureText(t).width+20; ctx.fillStyle = 'rgba(0,0,0,0.5)'; ctx.beginPath(); ctx.roundRect(cx, c.height-42, tw, 28, 6); ctx.fill(); ctx.fillStyle = '#e040fb'; ctx.fillText(t, cx+10, c.height-28); cx += tw+10; }
+        if (State.focusRoutes.size > 0) {
+            let focusTotal = 0;
+            for (const el2 of State.elements) {
+                const fd = State.getFocusForElement(el2);
+                if (fd) focusTotal += Object.values(fd).reduce((s, r) => s + r.count, 0);
+            }
+            const t = `🎯${State.focusRoutes.size}r ${focusTotal}cnt`, tw = ctx.measureText(t).width + 20;
+            ctx.fillStyle = 'rgba(255,107,107,0.2)'; ctx.beginPath(); ctx.roundRect(cx, c.height - 42, tw, 28, 6); ctx.fill();
+            ctx.strokeStyle = '#FF6B6B'; ctx.lineWidth = 1; ctx.beginPath(); ctx.roundRect(cx, c.height - 42, tw, 28, 6); ctx.stroke();
+            ctx.fillStyle = '#FF6B6B'; ctx.fillText(t, cx + 10, c.height - 28); cx += tw + 10;
+        }
 
         const sh = getCurrentShiftLabel(), sht = `⏰${sh}`, shw = ctx.measureText(sht).width+20;
         ctx.fillStyle = 'rgba(0,0,0,0.6)'; ctx.beginPath(); ctx.roundRect(c.width-shw-10, c.height-42, shw, 28, 6); ctx.fill();
@@ -2268,13 +2479,14 @@ const R = {
                 if (ctrl && e.key.toLowerCase() === 'v') { e.preventDefault(); if (State.clipboard.length) { const cx2 = (this.canvas.width / 2 - State.offsetX) / State.scale, cy2 = (this.canvas.height / 2 - State.offsetY) / State.scale; State.paste(cx2, cy2); UI.refreshList(); this.render(); } return; }
                 if (ctrl && e.key.toLowerCase() === 'd') { e.preventDefault(); if (State.selectedElements.length) { State.duplicateSelected(CONFIG.grid.size, CONFIG.grid.size); UI.refreshList(); this.render(); } return; }
             }
-            if (!State.editMode) { if (e.key === 'Escape') { State.clearSelection(); State.clearHighlight(); State.updateMapSearch(''); const si = document.getElementById('map-search-input'); if (si) si.value = ''; UI.closeDrawer(); UI.clearInspector(); UI.refreshList(); UI.updateDataPanel(); this.render(); } return; }
+            if (!State.editMode) { if (e.key === 'Escape') { State.clearSelection(); State.clearHighlight(); State.updateMapSearch(''); const si = document.getElementById('map-search-input'); if (si) si.value = ''; UI.closeDrawer(); UI.clearInspector(); UI.refreshList(); UI.updateDataPanel();State.clearFocus();UI._renderFocusBar();
+ this.render(); } return; }
             switch (e.key.toLowerCase()) {
                 case 's': if (!ctrl) State.mode = MODE.SELECT; break;
                 case 'a': if (!ctrl) State.mode = MODE.ADD; break;
                 case 'd': if (!ctrl) State.mode = MODE.DELETE; break;
                 case 'delete': case 'backspace': if (State.selectedIds.size > 0) { State.pushUndo(); State.elements = State.elements.filter(el => !State.selectedIds.has(el.id)); State.clearSelection(); State.save(); UI.clearInspector(); UI.refreshList(); } break;
-                case 'escape': State.clearSelection(); State.clearHighlight(); State.updateMapSearch(''); { const si = document.getElementById('map-search-input'); if (si) si.value = ''; } UI.closeDrawer(); State.isDrawing = false; State.drawPreview = null; State.isBoxSelecting = false; UI.clearInspector(); UI.refreshList(); UI.updateDataPanel(); break;
+                case 'escape': State.clearSelection(); State.clearHighlight(); State.updateMapSearch(''); { const si = document.getElementById('map-search-input'); if (si) si.value = ''; } UI.closeDrawer(); State.isDrawing = false; State.drawPreview = null; State.isBoxSelecting = false; UI.clearInspector(); UI.refreshList(); UI.updateDataPanel();State.clearFocus();UI._renderFocusBar(); break;
                 default: return;
             }
             c.style.cursor = State.mode === MODE.ADD ? 'crosshair' : State.mode === MODE.DELETE ? 'not-allowed' : 'default';
@@ -2453,6 +2665,15 @@ select.tsel{background:#37475a;color:#e0e0e0;border:1px solid #4a5a6a;padding:4p
 .maps-save-input::placeholder{color:#3a4a5a}
 .maps-empty{font-size:11px;color:#5a6a7a;font-style:italic;text-align:center;padding:12px}
 .maps-footer{padding:8px 16px;border-top:1px solid #2a3a4a;display:flex;justify-content:space-between;align-items:center;background:#0d1b2a;font-size:9px;color:#5a6a7a}
+.focus-bar{display:none;padding:4px 10px;border-bottom:1px solid #1a2a3a;background:rgba(255,107,107,.06);gap:6px;flex-wrap:wrap;align-items:center}
+.focus-bar.active{display:flex}
+.focus-chip{display:inline-flex;align-items:center;gap:4px;padding:2px 8px;border-radius:12px;font-size:10px;font-weight:bold;font-family:'Amazon Ember',monospace;cursor:default;white-space:nowrap;transition:.15s}
+.focus-chip .fc-dot{width:8px;height:8px;border-radius:50%;flex-shrink:0}
+.focus-chip .fc-cnt{font-weight:normal;opacity:.7;font-size:9px}
+.focus-chip .fc-close{cursor:pointer;opacity:.5;font-size:11px;margin-left:2px;padding:0 2px;border-radius:2px}.focus-chip .fc-close:hover{opacity:1;background:rgba(255,255,255,.15)}
+.focus-clear{background:none;border:1px solid #5a6a7a;color:#8899aa;padding:2px 8px;border-radius:12px;font-size:10px;cursor:pointer;white-space:nowrap;transition:.15s}.focus-clear:hover{border-color:#ff5252;color:#ff5252}
+.focus-label{font-size:10px;color:#ff9900;font-weight:bold;flex-shrink:0}
+.load-focus-btn{background:none;border:none;font-size:11px;cursor:pointer;padding:1px 4px;border-radius:3px;flex-shrink:0;opacity:.3;transition:.15s;line-height:1}.load-focus-btn:hover{opacity:.8}.load-focus-btn.focused{opacity:1}
 
         `);
 
@@ -2477,8 +2698,9 @@ select.tsel{background:#37475a;color:#e0e0e0;border:1px solid #4a5a6a;padding:4p
         <div class="dp-tab active" data-ltab="ob">📤 OB <span class="loads-sub-count" id="lsc-ob">0</span></div>
         <div class="dp-tab" data-ltab="noninv">🔀 NonInv <span class="loads-sub-count" id="lsc-noninv">0</span></div>
         <div class="dp-tab" data-ltab="ib">📥 IB <span class="loads-sub-count" id="lsc-ib">0</span></div>
-    </div>
-    <div id="loads-ob-filters" class="load-filters-bar">
+</div>
+<div class="focus-bar" id="focus-bar"></div>
+<div id="loads-ob-filters" class="load-filters-bar">
         <label class="load-filter-toggle"><input type="checkbox" id="chk-hide-old" checked>⏰ Hide old DEP 1h+</label>
         <span class="load-filter-counts" id="load-filter-counts"></span>
     </div>
@@ -2590,6 +2812,71 @@ select.tsel{background:#37475a;color:#e0e0e0;border:1px solid #4a5a6a;padding:4p
         inp.addEventListener('input', function() { clearTimeout(db); db = setTimeout(function() { self._vistaSearch = inp.value.trim().toUpperCase(); self.updateVistaPanel(); self.updateVistaRoutesPanel(); }, 150); });
         inp.addEventListener('keydown', function(e) { e.stopPropagation(); if (e.key === 'Escape') { inp.value = ''; self._vistaSearch = ''; self.updateVistaPanel(); self.updateVistaRoutesPanel(); inp.blur(); } });
         clear.onclick = function() { inp.value = ''; self._vistaSearch = ''; self.updateVistaPanel(); self.updateVistaRoutesPanel(); };
+    },
+    _renderFocusBar() {
+        const bar = document.getElementById('focus-bar');
+        if (!bar) return;
+
+        if (!State.focusRoutes.size) {
+            bar.classList.remove('active');
+            bar.innerHTML = '';
+            return;
+        }
+
+        bar.classList.add('active');
+
+        // Count Vista containers per focused route
+        const routeStats = {};
+        for (const [gKey, fr] of State.focusRoutes) {
+            routeStats[gKey] = { color: fr.color, count: 0, pkgs: 0 };
+        }
+        for (const c of State.vistaContainers) {
+            if (c._state === 'Loaded') continue;
+            if (!c.route) continue;
+            const gKey = routeGroupKey(c.route);
+            if (routeStats[gKey]) {
+                routeStats[gKey].count++;
+                routeStats[gKey].pkgs += c.childCount || 0;
+            }
+        }
+
+        const chips = [];
+        for (const [gKey, st] of Object.entries(routeStats)) {
+            chips.push(
+                `<span class="focus-chip" style="background:${st.color}18;border:1px solid ${st.color}55;color:${st.color}" data-focus-route="${gKey}">`
+                + `<span class="fc-dot" style="background:${st.color}"></span>`
+                + `${gKey}`
+                + `<span class="fc-cnt">×${st.count}</span>`
+                + `<span class="fc-close" data-focus-remove="${gKey}">✕</span>`
+                + `</span>`
+            );
+        }
+
+        const totalCnt = Object.values(routeStats).reduce((s, r) => s + r.count, 0);
+
+        bar.innerHTML = `<span class="focus-label">🎯 FOCUS</span>`
+            + chips.join('')
+            + `<span style="font-size:9px;color:#5a6a7a;margin-left:auto">${totalCnt} cnt</span>`
+            + `<button class="focus-clear" id="focus-clear-all">✕ Clear</button>`;
+
+        // Bind chip remove
+        bar.querySelectorAll('[data-focus-remove]').forEach(btn => {
+            btn.addEventListener('click', (e) => {
+                e.stopPropagation();
+                State.toggleFocusRoute(btn.dataset.focusRemove);
+                this._renderFocusBar();
+                this.updateDataPanel();
+                R.render();
+            });
+        });
+
+        // Bind clear all
+        document.getElementById('focus-clear-all')?.addEventListener('click', () => {
+            State.clearFocus();
+            this._renderFocusBar();
+            this.updateDataPanel();
+            R.render();
+        });
     },
 
     _initDataPanel() {
@@ -2920,6 +3207,22 @@ select.tsel{background:#37475a;color:#e0e0e0;border:1px solid #4a5a6a;padding:4p
         if (parts.length) html += `<div class="hidden-count">${parts.join(' · ')} hidden</div>`;
         if (filterCounts) filterCounts.textContent = oldDepN > 0 ? `⏰${oldDepN}` : '';
         list.innerHTML = html || '<div class="dp-empty">No matching OB loads</div>';
+                // ── Focus Mode: bind eye buttons ──
+        list.querySelectorAll('.load-focus-btn').forEach(btn => {
+            btn.addEventListener('click', (e) => {
+                e.stopPropagation();  // don't trigger load expand
+                const rawRoute = btn.dataset.focusRaw;
+                if (!rawRoute) return;
+                State.toggleFocusRoute(rawRoute);
+                this._renderFocusBar();
+                this.updateDataPanel();  // re-renders list to update eye states
+                R.render();
+            });
+        });
+
+        // Render focus bar
+        this._renderFocusBar();
+
     },
 
     _renderSSPLoadItem(l, idx) {
@@ -2936,7 +3239,23 @@ select.tsel{background:#37475a;color:#e0e0e0;border:1px solid #4a5a6a;padding:4p
         if (yiAll) { const allAnn = yiAll.every(yi => yi.fromAnnotation); yb = allAnn ? `<span class="load-yms-badge load-yms-annotation">📝</span>` : `<span class="load-yms-badge load-yms-found">✅${yiAll.length > 1 ? yiAll.length : ''}</span>`; }
         let ml = '';
         if (l._containers) { const locs = l._containers.locations.map(lc => lc.label); const mt = locs.filter(ll => State.elements.some(el => matchElement(el, ll))).length; const um = locs.length - mt; ml = `<div class="load-match-info">🔦${mt}/${locs.length}${um ? ` ⚠️${um}` : ''}</div>`; }
-        return `<div class="load-item ${l._expanded ? 'expanded' : ''} ${isHL ? 'hl-active' : ''}" data-load-idx="${idx}"><div class="load-header"><span class="load-expand-icon">${l._expanded ? '▼' : '▶'}</span><span class="load-route" title="${l.rawRoute}">${l.route}</span>${eqBadge}<span class="load-status" style="background:${l.statusColor};color:#000">${l.statusShort}</span>${l.dockDoor !== '—' ? `<span class="load-dock">${l.dockDoor}</span>` : ''}<span class="load-sdt ${isCptLoad ? 'cpt-load' : ''}">${isCptLoad ? '⭐' : ''}${sdtShort}</span>${cptBadge}${yb}${l._swapCount > 1 ? `<span class="load-swap-badge">🔀${l._swapCount}</span>` : (isSwap ? '<span class="load-swap-badge">🔀</span>' : '')}</div>${ml}${l._containersLoading ? '<div class="cnt-loading pulse">⏳</div>' : ''}</div>`;
+        const isFocused = State.isFocusRoute(l.rawRoute);
+const focusColor = isFocused ? State.focusRoutes.get(routeGroupKey(l.rawRoute))?.color || '#ff9900' : '';
+const eyeBtn = `<button class="load-focus-btn ${isFocused ? 'focused' : ''}" data-focus-raw="${l.rawRoute}" title="Toggle focus" style="${isFocused ? 'color:' + focusColor : ''}">👁</button>`;
+
+        return `<div class="load-item ${l._expanded ? 'expanded' : ''} ${isHL ? 'hl-active' : ''}" data-load-idx="${idx}">
+<div class="load-header">
+<span class="load-expand-icon">${l._expanded ? '▼' : '▶'}</span>
+<span class="load-route" title="${l.rawRoute}">${l.route}</span>
+${eqBadge}
+<span class="load-status" style="background:${l.statusColor};color:#000">${l.statusShort}</span>
+${l.dockDoor !== '—' ? `<span class="load-dock">${l.dockDoor}</span>` : ''}
+<span class="load-sdt ${isCptLoad ? 'cpt-load' : ''}">${isCptLoad ? '⭐' : ''}${sdtShort}</span>
+${cptBadge}${yb}
+${l._swapCount > 1 ? `<span class="load-swap-badge">🔀${l._swapCount}</span>` : (isSwap ? '<span class="load-swap-badge">🔀</span>' : '')}
+${eyeBtn}
+</div>${ml}${l._containersLoading ? '<div class="cnt-loading pulse">⏳</div>' : ''}</div>`;
+
     },
 
     // ═══════════════════════════════════════════════════
