@@ -1534,21 +1534,24 @@ const RELAT = {
         UI._updateLoadsSubCounts();
     },
 
-    _buildCompletedSet(rawList) {
-        this.completedVrIds.clear();
-        for (const raw of rawList) {
-            const status = (raw.task_status || '').toUpperCase();
-            if (status === 'COMPLETED' || status === 'COMPLETED_LATE') {
-                const vrId = (raw.vrid || '').toUpperCase();
-                if (vrId) this.completedVrIds.add(vrId);
-            }
-        }
-    },
-
-    isCompleted(vrId) {
-        if (!vrId) return false;
-        return this.completedVrIds.has(vrId.toUpperCase());
-    },
+_buildCompletedSet(rawList) {
+    this.completedVrIds.clear();
+    // Only these statuses mean "truck still expected / not yet unloaded"
+    // 🟡 PENDING        → "Truck arrived, pending input"
+    // 🟠 PENDING_LATE   → "Truck at dock door, input is due"
+    // 🔵 SCHEDULED      → "Truck is scheduled"
+    // 🔵 SCHEDULED_LATE → "Truck is scheduled" (overdue)
+    const STILL_PENDING = new Set([
+        'PENDING', 'PENDING_LATE',
+        'SCHEDULED', 'SCHEDULED_LATE'
+    ]);
+    for (const raw of rawList) {
+        const status = (raw.task_status || '').toUpperCase();
+        if (STILL_PENDING.has(status)) continue; // still awaiting — keep in NonInv
+        const vrId = (raw.vrid || '').toUpperCase();
+        if (vrId) this.completedVrIds.add(vrId);
+    }
+},
 
     // ── Lifecycle ──
     start() {
