@@ -13,7 +13,8 @@
 // @grant        GM_addStyle
 // @grant        GM_setValue
 // @grant        GM_getValue
-// @connect raw.githubusercontent.com
+// @connect      api.github.com
+// @connect      raw.githubusercontent.com
 // @connect      trans-logistics-eu.amazon.com
 // @connect      jwmjkz3dsd.execute-api.eu-west-1.amazonaws.com
 // @connect      fc-inbound-dock-execution-service-eu-eug1-dub.dub.proxy.amazon.com
@@ -490,7 +491,7 @@ const State = {
         }
         R.render();
     },
-    save() { this._persistSave(); MatchIndex.rebuild(this.elements); },
+    save() { this._persistSave(); MatchIndex.rebuild(this.elements); GitSync.schedulePush(); },
     _persistSave() { GM_setValue(CONFIG.storage.key, JSON.stringify({ elements: this.elements })); },
     load() { try { const r = GM_getValue(CONFIG.storage.key, null); if (r) this.elements = JSON.parse(r).elements || []; } catch {} for (const el of this.elements) { if (!el.hasOwnProperty('chute')) el.chute = ''; if (!el.hasOwnProperty('maxContainers')) el.maxContainers = 0; } this.editMode = GM_getValue(CONFIG.storage.editModeKey, false); this.legendCollapsed = GM_getValue(CONFIG.storage.legendCollapsedKey, false); this.elementsCollapsed = GM_getValue(CONFIG.storage.elementsCollapsedKey, false); this.loadViewport(); MatchIndex.rebuild(this.elements); },
     _vpSaveTimer: null,
@@ -1552,6 +1553,12 @@ _buildCompletedSet(rawList) {
         if (vrId) this.completedVrIds.add(vrId);
     }
 },
+
+
+    isCompleted(vrId) {
+        if (!vrId) return false;
+        return this.completedVrIds.has(vrId.toUpperCase());
+    },
 
     // ── Lifecycle ──
     start() {
@@ -4849,7 +4856,21 @@ ${(() => { const cptUrgent = loads.filter(l => l.status !== 'DEPARTED' && l.stat
             + '<div style="display:flex;gap:4px;margin-bottom:4px"><button class="btn sm" id="bg-upload">\uD83D\uDCC2 File</button><button class="btn sm cyan" id="bg-url-btn">\uD83D\uDD17 URL</button>' + (hasBg ? '<button class="btn sm cyan" id="bg-edit-toggle">\uD83D\uDCD0 Move</button><button class="btn sm del" id="bg-remove">\uD83D\uDDD1 Remove</button>' : '') + '</div>'
             + '<div id="bg-url-wrap" style="display:none;margin-top:4px"><div style="display:flex;gap:4px"><input id="bg-url-input" style="flex:1;background:#0d1b2a;color:#4fc3f7;border:1px solid #2a3a4a;padding:4px 8px;border-radius:4px;font-size:10px" placeholder="https://...image.png" spellcheck="false" value="' + (BgImage.bgUrl || '') + '"><button class="btn sm green" id="bg-url-apply">\u2713</button></div></div>'
             + (hasBg ? '<div style="margin-top:4px"><div style="display:flex;align-items:center;gap:6px;font-size:11px"><label style="color:#8899aa;font-size:10px;min-width:50px">Opacity</label><input type="range" id="bg-opacity" min="0.05" max="1" step="0.05" value="' + SiteSettings.bgOpacity + '" style="flex:1;accent-color:#ff9900"></div><div style="display:flex;align-items:center;gap:6px;font-size:11px;margin-top:4px"><label style="color:#8899aa;font-size:10px;min-width:50px">Scale</label><input type="range" id="bg-scale" min="0.05" max="10" step="0.05" value="' + SiteSettings.bgScale + '" style="flex:1;accent-color:#ff9900"></div></div>' : '')
-            + '</div></div>';
+            + '<div style="margin-top:8px;padding-top:8px;border-top:1px solid #2a3a4a">'
++ '<h4 style="font-size:10px;color:#69f0ae;margin-bottom:6px;text-transform:uppercase">☁️ GitSync</h4>'
++ '<div style="display:flex;gap:4px;margin-bottom:4px">'
++ '<input id="gitsync-token" type="password" style="flex:1;background:#0d1b2a;color:#69f0ae;border:1px solid #2a3a4a;padding:4px 8px;border-radius:4px;font-size:10px;font-family:monospace" placeholder="ghp_..." value="' + (GitSync._getToken() ? '••••••••••' : '') + '" spellcheck="false">'
++ '<button class="btn sm green" id="gitsync-save">✓</button>'
++ '</div>'
++ '<div style="display:flex;gap:4px">'
++ '<button class="btn sm cyan" id="gitsync-push">☁️ Push now</button>'
++ '<button class="btn sm" id="gitsync-pull">📥 Pull</button>'
++ (GitSync.enabled ? '<button class="btn sm del" id="gitsync-remove">✕</button>' : '')
++ '</div>'
++ '<div style="font-size:9px;color:#5a6a7a;margin-top:4px">'
++ (GitSync.enabled ? '✅ Auto-sync ON — pushes 10s after edits' : '❌ No token — edits stay local only')
++ '</div></div>'
++ '</div></div>';
         var self = this;
         var bt = function(id, key) { var el = document.getElementById(id); if (el) el.addEventListener('change', function(e) { SiteSettings[key] = e.target.value; saveSiteSettingsImmediate(); SSP.fetchData(); }); };
         bt('set-ds-start','dsStart'); bt('set-ds-end','dsEnd'); bt('set-ns-start','nsStart'); bt('set-ns-end','nsEnd');
@@ -4865,6 +4886,36 @@ ${(() => { const cptUrgent = loads.filter(l => l.status !== 'DEPARTED' && l.stat
             var scSlider = document.getElementById('bg-scale'); if (scSlider) { scSlider.addEventListener('input', function(e) { SiteSettings.bgScale = parseFloat(e.target.value); R.render(); }); scSlider.addEventListener('change', function() { saveSiteSettings(); }); }
         }
         wrap.querySelectorAll('input[type="time"]').forEach(function(inp) { inp.addEventListener('keydown', function(e) { e.stopPropagation(); }); });
+// ── GitSync bindings ──
+document.getElementById('gitsync-save')?.addEventListener('click', function() {
+    var inp = document.getElementById('gitsync-token');
+    var val = inp.value.trim();
+    if (val && !val.startsWith('•')) {
+        GitSync.setToken(val);
+        inp.value = '••••••••••';
+        self._renderSettings();
+        UI.setStatus('☁️ GitSync token saved');
+    }
+});
+document.getElementById('gitsync-push')?.addEventListener('click', function() {
+    GitSync.push(true);
+});
+document.getElementById('gitsync-pull')?.addEventListener('click', function() {
+    GitSync.pull();
+});
+document.getElementById('gitsync-remove')?.addEventListener('click', function() {
+    GitSync.removeToken();
+    self._renderSettings();
+    UI.setStatus('☁️ GitSync disabled');
+});
+document.getElementById('gitsync-token')?.addEventListener('keydown', function(e) {
+    e.stopPropagation();
+    if (e.key === 'Enter') document.getElementById('gitsync-save').click();
+});
+document.getElementById('gitsync-token')?.addEventListener('focus', function(e) {
+    if (e.target.value.startsWith('•')) e.target.value = '';
+});
+
     },
 
     _initTypeEditor() {
@@ -4906,6 +4957,225 @@ ${(() => { const cptUrgent = loads.filter(l => l.status !== 'DEPARTED' && l.stat
     },
 
 };
+// ============================================================
+// GITSYNC — Auto-push map changes to GitHub
+// ============================================================
+const GitSync = {
+    _owner: 'homziukl',
+    _repo: 'Ship-Map-Builder',
+    _branch: 'main',
+    _apiBase: 'https://api.github.com',
+    _debounceTimer: null,
+    _debounceMs: 10000,
+    _pushing: false,
+    _lastPushHash: '',
+    _lastKnownCount: 0,     // ← TU — safety check for catastrophic loss
+    _backupKey: 'gitsync_last_backup',  // ← i ten też jeśli dodajesz daily backup
+    enabled: false,
+
+    _getToken() { return GM_getValue('gitsync_pat', ''); },
+    setToken(tok) { GM_setValue('gitsync_pat', tok); this.enabled = !!tok; },
+    removeToken() { GM_setValue('gitsync_pat', ''); this.enabled = false; },
+
+    _filePath() {
+        return `shipmap_${CONFIG.warehouseId.toUpperCase()}.json`;
+    },
+
+    _headers() {
+        return {
+            'Authorization': `Bearer ${this._getToken()}`,
+            'Accept': 'application/vnd.github+json',
+            'Content-Type': 'application/json',
+            'X-GitHub-Api-Version': '2022-11-28'
+        };
+    },
+
+    // ── Get current file SHA (needed for update) ──
+    async _getSha() {
+        const path = this._filePath();
+        const url = `${this._apiBase}/repos/${this._owner}/${this._repo}/contents/${path}?ref=${this._branch}`;
+
+        return new Promise((resolve, reject) => {
+            GM_xmlhttpRequest({
+                method: 'GET', url,
+                headers: this._headers(),
+                onload(r) {
+                    if (r.status === 200) {
+                        try {
+                            const data = JSON.parse(r.responseText);
+                            resolve(data.sha);
+                        } catch { reject({ message: 'JSON parse error' }); }
+                    } else if (r.status === 404) {
+                        resolve(null); // file doesn't exist yet → create
+                    } else {
+                        reject({ message: `HTTP ${r.status}` });
+                    }
+                },
+                onerror() { reject({ message: 'Network error' }); }
+            });
+        });
+    },
+
+    // ── Push file to GitHub ──
+    async push(manual = false) {
+        const token = this._getToken();
+        if (!token) {
+            if (manual) UI.setStatus('⚠️ GitSync: no token — open Settings');
+            return;
+
+        }
+        if (this._pushing) return;
+        // ── Safety checks ──
+const elCount = State.elements.length;
+
+// Never push empty map
+if (elCount === 0) {
+    if (manual) UI.setStatus('⚠️ GitSync: refusing to push empty map');
+    this._pushing = false;
+    return;
+}
+
+// Catastrophic loss detection — if we had 50+ elements and now <10, block auto-push
+if (!manual && this._lastKnownCount > 50 && elCount < this._lastKnownCount * 0.2) {
+    console.warn(`[ShipMap:GitSync] ⚠ Blocked auto-push: ${this._lastKnownCount} → ${elCount} elements (>80% loss)`);
+    UI.setStatus(`⚠️ GitSync: blocked — ${this._lastKnownCount}→${elCount} elements. Manual push if intended.`);
+    this._pushing = false;
+    return;
+}
+
+this._lastKnownCount = elCount;
+
+        this._pushing = true;
+
+        try {
+            const content = State.exportJSON();
+
+            // Simple hash to avoid pushing identical content
+            const hash = content.length + '_' + content.substring(0, 200);
+            if (!manual && hash === this._lastPushHash) {
+                this._pushing = false;
+                return;
+            }
+
+            UI.setStatus('☁️ GitSync: pushing...');
+
+            const sha = await this._getSha();
+            const path = this._filePath();
+            const url = `${this._apiBase}/repos/${this._owner}/${this._repo}/contents/${path}`;
+
+            const now = new Date();
+            const timeStr = `${now.getHours().toString().padStart(2,'0')}:${now.getMinutes().toString().padStart(2,'0')}`;
+            const message = `🚢 ${CONFIG.warehouseId} — ${State.elements.length} elements — ${timeStr}`;
+
+            const body = {
+                message,
+                content: btoa(unescape(encodeURIComponent(content))),
+                branch: this._branch
+            };
+            if (sha) body.sha = sha; // update existing file
+
+            const result = await new Promise((resolve, reject) => {
+                GM_xmlhttpRequest({
+                    method: 'PUT', url,
+                    headers: this._headers(),
+                    data: JSON.stringify(body),
+                    onload(r) {
+                        if (r.status === 200 || r.status === 201) {
+                            try { resolve(JSON.parse(r.responseText)); }
+                            catch { resolve({}); }
+                        } else if (r.status === 409) {
+                            reject({ message: 'Conflict — someone else pushed. Refresh & retry.' });
+                        } else if (r.status === 401 || r.status === 403) {
+                            reject({ message: 'Auth failed — check token permissions' });
+                        } else if (r.status === 422) {
+                            reject({ message: 'SHA mismatch — file changed. Retry...' });
+                        } else {
+                            reject({ message: `HTTP ${r.status}` });
+                        }
+                    },
+                    onerror() { reject({ message: 'Network error' }); }
+                });
+            });
+
+            this._lastPushHash = hash;
+            const shortSha = result.content?.sha?.substring(0, 7) || '✓';
+            UI.setStatus(`☁️ Synced → ${shortSha} · ${State.elements.length} el`);
+            console.log(`[ShipMap:GitSync] ✅ Pushed ${path} (${shortSha})`);
+
+        } catch (err) {
+            console.error(`[ShipMap:GitSync] ❌ ${err.message}`);
+            UI.setStatus(`❌ GitSync: ${err.message}`);
+
+            // Auto-retry on SHA mismatch (once)
+            if (err.message?.includes('SHA mismatch') && !manual) {
+                this._pushing = false;
+                setTimeout(() => this.push(false), 2000);
+                return;
+            }
+        }
+
+        this._pushing = false;
+    },
+
+    // ── Schedule push (debounced) ──
+    schedulePush() {
+        if (!this.enabled) return;
+        clearTimeout(this._debounceTimer);
+        this._debounceTimer = setTimeout(() => this.push(false), this._debounceMs);
+    },
+
+    // ── Pull latest from GitHub ──
+    async pull() {
+        const token = this._getToken();
+        if (!token) { UI.setStatus('⚠️ GitSync: no token'); return false; }
+
+        UI.setStatus('☁️ GitSync: pulling...');
+
+        try {
+            const path = this._filePath();
+            const url = `${this._apiBase}/repos/${this._owner}/${this._repo}/contents/${path}?ref=${this._branch}`;
+
+            const data = await new Promise((resolve, reject) => {
+                GM_xmlhttpRequest({
+                    method: 'GET', url,
+                    headers: this._headers(),
+                    onload(r) {
+                        if (r.status === 200) {
+                            try { resolve(JSON.parse(r.responseText)); }
+                            catch { reject({ message: 'JSON parse' }); }
+                        } else if (r.status === 404) {
+                            reject({ message: `File not found: ${path}` });
+                        } else {
+                            reject({ message: `HTTP ${r.status}` });
+                        }
+                    },
+                    onerror() { reject({ message: 'Network error' }); }
+                });
+            });
+
+            const content = decodeURIComponent(escape(atob(data.content.replace(/\n/g, ''))));
+            const ok = State.importJSON(content);
+            if (ok) {
+                UI.setStatus(`☁️ Pulled: ${State.elements.length} elements`);
+                UI._initLegend();
+                UI._initType();
+                UI.refreshList();
+                R.render();
+                return true;
+            }
+            UI.setStatus('❌ GitSync: invalid map data');
+            return false;
+
+        } catch (err) {
+            UI.setStatus(`❌ GitSync: ${err.message}`);
+            return false;
+        }
+    },
+
+    init() {
+        this.enabled = !!this._getToken();
+    }
+};
 
 // ============================================================
 // MAIN — bootstrap
@@ -4918,8 +5188,9 @@ function bootMain() {
     UI.refreshList();
     UI.setStatus(`✅ v3.3.1 | ${State.elements.length} el | ${State.editMode ? '🔓' : '🔒'}`);
     try { Minimap.init(); } catch(e) { console.warn('[Minimap] init failed:', e); }
+    try { GitSync.init(); } catch(e) { console.warn('[GitSync] init failed:', e); }
 try { unsafeWindow.__SM = { State, YMS, FMC, Dockmaster, RELAT, MapManager, MatchIndex, ymsGetVrIds }; } catch(e) {}
-try { window.__SM = { State, YMS, FMC, Dockmaster, RELAT, MapManager, MatchIndex, ymsGetVrIds }; } catch(e) {}
+try { window.__SM = { State, YMS, FMC, Dockmaster, RELAT, MapManager, GitSync, MatchIndex, ymsGetVrIds }; } catch(e) {}
 try { document.__SM = { State, YMS, FMC, Dockmaster, RELAT, MapManager, MatchIndex, ymsGetVrIds }; } catch(e) {}
 
 
