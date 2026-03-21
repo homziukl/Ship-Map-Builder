@@ -1467,7 +1467,7 @@ const Dockmaster = {
         this.stopAutoRefresh();
         // Delay first fetch to let other modules load first
         setTimeout(() => this.fetchData(0, 0), 2000);
-        this._autoTimer = setInterval(() => this.fetchData(0, 0), 180000); // 3 min
+        this._autoTimer = setInterval(() => this.fetchData(0, 1), 120000); // 3 min
     },
 
 
