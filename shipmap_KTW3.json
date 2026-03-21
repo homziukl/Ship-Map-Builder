@@ -12430,6 +12430,17 @@
       "y": 1900,
       "w": 20,
       "h": 20
+    },
+    {
+      "id": "PS-015",
+      "name": "DSP_BOX 070",
+      "type": "custom_3",
+      "chute": "",
+      "maxContainers": 0,
+      "x": 2860,
+      "y": 1900,
+      "w": 20,
+      "h": 20
     }
   ],
   "types": {
@@ -12542,6 +12553,6 @@
     "bgScale": 5.3
   },
   "bgUrl": "https://i.postimg.cc/434zMMNH/image-(9)(1).png",
-  "exportedAt": "2026-03-21T17:53:30.801Z",
+  "exportedAt": "2026-03-21T23:09:15.824Z",
   "version": "3.3.1"
 }
