@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Ship Map Builder
 // @namespace    http://tampermonkey.net/
-// @version      3.3.3
+// @version      3.4.0
 // @description  Ship Map + SSP + YMS + Vista + FMC integration
 // @author       homziukl
 // @match        https://stem-eu.corp.amazon.com/url*
@@ -47,7 +47,7 @@ if (/trans-logistics-eu\.amazon\.com\/fmc/i.test(location.href)) {
     XMLHttpRequest.prototype.send = function (body) {
         if (this._sm_url && /\/fmc\/search\/execution\/by-criteria/i.test(this._sm_url)) {
             if (body && typeof body === 'string') {
-                try { GM_setValue('shipmap_fmc_captured_body', body); } catch {}
+                try { GM_setValue('shipmap_fmc_captured_body', body); } catch (e) { console.debug('[ShipMap:FMC] save body failed:', e.message); }
             }
             this.addEventListener('load', () => {
                 if (this.status >= 200 && this.status < 300 && this.responseText) {
@@ -60,7 +60,7 @@ if (/trans-logistics-eu\.amazon\.com\/fmc/i.test(location.href)) {
                                 site: SITE
                             }));
                         }
-                    } catch {}
+                    } catch (e) { console.debug('[ShipMap:FMC] parse response failed:', e.message); }
                 }
             });
         }
@@ -109,6 +109,46 @@ if (!CanvasRenderingContext2D.prototype.roundRect) {
 function debounce(fn, ms) { let timer; return function (...args) { clearTimeout(timer); timer = setTimeout(() => fn.apply(this, args), ms); }; }
 
 // ============================================================
+// SILENT CATCH — log errors instead of swallowing them
+// ============================================================
+function silentCatch(context, fn) {
+    try { return fn(); }
+    catch (e) { console.debug(`[ShipMap:${context}]`, e.message); }
+}
+
+// ============================================================
+// PARSE ROUTE — unified route string cleanup
+// ============================================================
+function parseRoute(raw, { stripPrefix = true, stripSuffix = true } = {}) {
+    let r = raw || '';
+    if (stripPrefix) r = r.replace(/^[A-Z0-9]+->/i, '');
+    if (stripSuffix) r = r.replace(/-(?:H\d|ND|DDU|VCRI)$/i, '');
+    return r;
+}
+
+// ============================================================
+// LIFECYCLE — central timer management
+// ============================================================
+const Lifecycle = {
+    _timers: [],
+    register(name, fn, interval) {
+        const id = setInterval(fn, interval);
+        this._timers.push({ name, id });
+        return id;
+    },
+    unregister(id) {
+        clearInterval(id);
+        this._timers = this._timers.filter(t => t.id !== id);
+    },
+    stopAll() {
+        for (const t of this._timers) clearInterval(t.id);
+        this._timers = [];
+        console.log('[ShipMap] Lifecycle: all timers stopped');
+    },
+};
+window.addEventListener('beforeunload', () => Lifecycle.stopAll());
+
+// ============================================================
 // CONFIG
 // ============================================================
 const CONFIG = {
@@ -126,7 +166,11 @@ const CONFIG = {
         vistaCollapsedKey: 'shipmap_vista_collapsed', sidebarWidthKey: 'shipmap_sidebar_width',
         trendKey: 'shipmap_trend_v1', minimapKey: 'shipmap_minimap_visible',
     },
-    data: { refreshInterval: 120000, ymsRefreshInterval: 60000, vistaRefreshInterval: 120000, trendInterval: 600000 },
+    data: { refreshInterval: 120000, ymsRefreshInterval: 60000, vistaRefreshInterval: 120000, trendInterval: 600000, fmcRefreshInterval: 120000, dockmasterRefreshInterval: 120000, relatRefreshInterval: 180000, ymsTokenCaptureInterval: 30000, ymsTokenPickupInterval: 10000, uiRefreshInterval: 60000 },
+    urls: {
+        dockmaster: 'https://fc-inbound-dock-execution-service-eu-eug1-dub.dub.proxy.amazon.com',
+        relat: 'https://eu.relat.aces.amazon.dev',
+    },
     maxUndoSteps: 50,
 };
 
@@ -135,7 +179,7 @@ const CONFIG = {
 // ============================================================
 const DEFAULT_SITE = { dsStart:'07:00', dsEnd:'17:30', nsStart:'18:30', nsEnd:'05:00', filterSwapBefore:true, bgOpacity:0.3, bgOffsetX:0, bgOffsetY:0, bgScale:1 };
 const SiteSettings = { ...DEFAULT_SITE };
-function loadSiteSettings() { try { const r = GM_getValue(CONFIG.storage.siteSettingsKey, null); if (r) Object.assign(SiteSettings, JSON.parse(r)); } catch {} }
+function loadSiteSettings() { silentCatch('loadSiteSettings', () => { const r = GM_getValue(CONFIG.storage.siteSettingsKey, null); if (r) Object.assign(SiteSettings, JSON.parse(r)); }); }
 const _saveSiteSettingsNow = () => GM_setValue(CONFIG.storage.siteSettingsKey, JSON.stringify(SiteSettings));
 const saveSiteSettings = debounce(_saveSiteSettingsNow, 300);
 function saveSiteSettingsImmediate() { _saveSiteSettingsNow(); }
@@ -185,12 +229,12 @@ function equipTypeColor(eq) {
 // ============================================================
 const BgImage = {
     img: null, dataUrl: null, bgUrl: null, loaded: false,
-    load() { try { const url = GM_getValue(CONFIG.storage.bgImageKey + '_url', null); const raw = GM_getValue(CONFIG.storage.bgImageKey, null); if (url) { this.bgUrl = url; this._loadFromUrl(url, raw); } else if (raw) { this.dataUrl = raw; this._createImg(raw); } } catch {} },
-    _loadFromUrl(url, fallbackDataUrl) { this.img = new Image(); this.img.crossOrigin = 'anonymous'; this.img.onload = () => { this.loaded = true; R.render(); }; this.img.onerror = () => { if (fallbackDataUrl) { this._createImg(fallbackDataUrl); } else { this.loaded = false; this.img = null; } }; this.img.src = url; },
-    _createImg(src) { if (!src) return; this.dataUrl = src; this.img = new Image(); this.img.onload = () => { this.loaded = true; R.render(); }; this.img.onerror = () => { this.loaded = false; this.img = null; }; this.img.src = src; },
+    load() { silentCatch('BgImage.load', () => { const url = GM_getValue(CONFIG.storage.bgImageKey + '_url', null); const raw = GM_getValue(CONFIG.storage.bgImageKey, null); if (url) { this.bgUrl = url; this._loadFromUrl(url, raw); } else if (raw) { this.dataUrl = raw; this._createImg(raw); } }); },
+    _loadFromUrl(url, fallbackDataUrl) { this.img = new Image(); this.img.crossOrigin = 'anonymous'; this.img.onload = () => { this.loaded = true; R.requestRender(); }; this.img.onerror = () => { if (fallbackDataUrl) { this._createImg(fallbackDataUrl); } else { this.loaded = false; this.img = null; } }; this.img.src = url; },
+    _createImg(src) { if (!src) return; this.dataUrl = src; this.img = new Image(); this.img.onload = () => { this.loaded = true; R.requestRender(); }; this.img.onerror = () => { this.loaded = false; this.img = null; }; this.img.src = src; },
     setUrl(url) { this.bgUrl = url; GM_setValue(CONFIG.storage.bgImageKey + '_url', url); this._loadFromUrl(url, this.dataUrl); },
     set(dataUrl) { this.dataUrl = dataUrl; GM_setValue(CONFIG.storage.bgImageKey, dataUrl); this._createImg(dataUrl); },
-    remove() { this.dataUrl = null; this.bgUrl = null; this.img = null; this.loaded = false; GM_setValue(CONFIG.storage.bgImageKey, ''); GM_setValue(CONFIG.storage.bgImageKey + '_url', ''); R.render(); },
+    remove() { this.dataUrl = null; this.bgUrl = null; this.img = null; this.loaded = false; GM_setValue(CONFIG.storage.bgImageKey, ''); GM_setValue(CONFIG.storage.bgImageKey + '_url', ''); R.requestRender(); },
 };
 BgImage.load();
 
@@ -210,7 +254,7 @@ const ELEMENT_TYPES = {};
 function darkenColor(hex, f = 0.72) { const m = hex.match(/^#?([0-9a-f]{2})([0-9a-f]{2})([0-9a-f]{2})$/i); if (!m) return hex; return '#' + [1, 2, 3].map(i => Math.round(parseInt(m[i], 16) * f).toString(16).padStart(2, '0')).join(''); }
 function loadTypeOverrides() {
     for (const [k, v] of Object.entries(DEFAULT_TYPES)) ELEMENT_TYPES[k] = { ...v };
-    try { const raw = GM_getValue(CONFIG.storage.typeOverridesKey, null); if (raw) { const ov = JSON.parse(raw); for (const [k, v] of Object.entries(ov)) { if (ELEMENT_TYPES[k]) { if (v.label) ELEMENT_TYPES[k].label = v.label; if (v.color) { ELEMENT_TYPES[k].color = v.color; ELEMENT_TYPES[k].border = v.border || darkenColor(v.color); } } else ELEMENT_TYPES[k] = { label:v.label||k, color:v.color||'#888', border:v.border||darkenColor(v.color||'#888'), builtIn:false }; } } } catch {}
+    silentCatch('loadTypeOverrides', () => { const raw = GM_getValue(CONFIG.storage.typeOverridesKey, null); if (raw) { const ov = JSON.parse(raw); for (const [k, v] of Object.entries(ov)) { if (ELEMENT_TYPES[k]) { if (v.label) ELEMENT_TYPES[k].label = v.label; if (v.color) { ELEMENT_TYPES[k].color = v.color; ELEMENT_TYPES[k].border = v.border || darkenColor(v.color); } } else ELEMENT_TYPES[k] = { label:v.label||k, color:v.color||'#888', border:v.border||darkenColor(v.color||'#888'), builtIn:false }; } } });
 }
 function saveTypeOverrides() { const ov = {}; for (const [k, v] of Object.entries(ELEMENT_TYPES)) ov[k] = { label:v.label, color:v.color, border:v.border, builtIn:!!v.builtIn }; GM_setValue(CONFIG.storage.typeOverridesKey, JSON.stringify(ov)); }
 function resetTypeOverrides() { for (const k of Object.keys(ELEMENT_TYPES)) if (!DEFAULT_TYPES[k]) delete ELEMENT_TYPES[k]; for (const [k, v] of Object.entries(DEFAULT_TYPES)) ELEMENT_TYPES[k] = { ...v }; saveTypeOverrides(); }
@@ -333,21 +377,21 @@ const FOCUS_PALETTE = [
     '#6C5CE7', '#81ECEC', '#FDCB6E', '#E17055', '#00B894',
 ];
 
-function routeGroupKey(rawRoute) { let s = rawRoute.replace(/^[A-Z0-9]+->/i, ''); s = s.replace(/-(?:VCRI|DDU|ND)$/i, ''); return s.toUpperCase(); }
-function routeSubLabel(rawRoute) { const s = rawRoute.replace(/^[A-Z0-9]+->/i, ''); const group = routeGroupKey(rawRoute); if (s.toUpperCase() === group) return null; const diff = s.toUpperCase().replace(group, '').replace(/^-/, ''); return diff || null; }
-function simplifyStackingFilter(sf) { let s = sf.replace(/^[A-Z0-9]+->/i, '').replace(/-(?:H\d|ND|DDU)$/i, ''); if (/BAG/i.test(s)) s = s.replace(/^(.*BAG).*$/i, '$1'); return s; }
+function routeGroupKey(rawRoute) { let s = parseRoute(rawRoute, { stripSuffix: false }); s = s.replace(/-(?:VCRI|DDU|ND)$/i, ''); return s.toUpperCase(); }
+function routeSubLabel(rawRoute) { const s = parseRoute(rawRoute, { stripSuffix: false }); const group = routeGroupKey(rawRoute); if (s.toUpperCase() === group) return null; const diff = s.toUpperCase().replace(group, '').replace(/^-/, ''); return diff || null; }
+function simplifyStackingFilter(sf) { let s = parseRoute(sf); if (/BAG/i.test(s)) s = s.replace(/^(.*BAG).*$/i, '$1'); return s; }
 
 function getVistaRouteContainers(loadRoute, loadRawRoute, sspExclude) {
     const lr = loadRoute.toUpperCase(); const lrr = (loadRawRoute || '').toUpperCase(); const byLoc = {};
     for (const vc of State.vistaContainers) {
         if (!vc.route) continue; if (!vc.childCount || vc.childCount <= 0) continue;
-        const vcr = vc.route.toUpperCase(); const vcrParsed = vcr.replace(/^[A-Z0-9]+->/i, '').replace(/-(?:H\d|ND|DDU)$/i, '');
+        const vcr = vc.route.toUpperCase(); const vcrParsed = parseRoute(vc.route).toUpperCase();
         if (vcrParsed !== lr && vcr !== lrr) continue;
         const loc = vc.location || 'UNKNOWN'; if (!/STAGE|HOT[-_\s]?PICK|GENERAL/i.test(loc)) continue;
         if (!byLoc[loc]) byLoc[loc] = { types: {}, total: 0, totalPkgs: 0, maxDwell: 0, cpts: {} };
         const g = byLoc[loc]; g.types[vc.type] = (g.types[vc.type] || 0) + 1; g.total++; g.totalPkgs += vc.childCount || 0; if (vc.dwellTimeInMinutes > g.maxDwell) g.maxDwell = vc.dwellTimeInMinutes;
         const cptVal = vc.cpt || null; let cptLabel = '—';
-        if (cptVal) { try { const cptDate = typeof cptVal === 'number' ? new Date(cptVal) : new Date(cptVal); if (!isNaN(cptDate.getTime())) { cptLabel = `${cptDate.getDate().toString().padStart(2,'0')}/${(cptDate.getMonth()+1).toString().padStart(2,'0')} ${cptDate.getHours().toString().padStart(2,'0')}:${cptDate.getMinutes().toString().padStart(2,'0')}`; } } catch {} }
+        if (cptVal) { try { const cptDate = typeof cptVal === 'number' ? new Date(cptVal) : new Date(cptVal); if (!isNaN(cptDate.getTime())) { cptLabel = `${cptDate.getDate().toString().padStart(2,'0')}/${(cptDate.getMonth()+1).toString().padStart(2,'0')} ${cptDate.getHours().toString().padStart(2,'0')}:${cptDate.getMinutes().toString().padStart(2,'0')}`; } } catch (e) { console.debug('[ShipMap] CPT parse:', e.message); } }
         if (!g.cpts[cptLabel]) g.cpts[cptLabel] = { types: {}, total: 0, totalPkgs: 0 };
         const cp = g.cpts[cptLabel]; cp.types[vc.type] = (cp.types[vc.type] || 0) + 1; cp.total++; cp.totalPkgs += vc.childCount || 0;
     }
@@ -535,16 +579,16 @@ const State = {
             const elKey = (el.name || el.id).toUpperCase(); if (elKey.includes(q)) { this.mapSearchMatches.add(el.id); continue; }
             const ymsLoc = this.getYmsForElement(el);
             if (ymsLoc?.yardAssets?.length) { let found = false; for (const asset of ymsLoc.yardAssets) { if (asset.type === 'TRACTOR') continue; const owner = (asset.owner?.code || asset.owner?.shortName || asset.broker?.code || '').toUpperCase(); const plate = (asset.licensePlateIdentifier?.registrationIdentifier || asset.vehicleNumber || '').toUpperCase(); const atype = (asset.type || '').toUpperCase().replace(/_/g, ' '); const ann = (asset.annotation || '').toUpperCase(); const vrIds = ymsGetVrIds(asset); const lane = (asset.load?.lane || asset.load?.routes?.[0] || '').toUpperCase(); if (owner.includes(q) || plate.includes(q) || atype.includes(q) || ann.includes(q) || lane.includes(q) || vrIds.some(v => v.includes(q))) { found = true; break; } } if (found) { this.mapSearchMatches.add(el.id); continue; } }
-            const vd = this.vistaElementMap?.[el.name || el.id]; if (vd?.routes) { let found = false; for (const route of Object.keys(vd.routes)) { const routeShort = route.replace(/^[A-Z0-9]+->/i, '').replace(/-(?:H\d|ND|DDU)$/i, '').toUpperCase(); if (routeShort.includes(q) || route.toUpperCase().includes(q)) { found = true; break; } } if (found) { this.mapSearchMatches.add(el.id); continue; } }
+            const vd = this.vistaElementMap?.[el.name || el.id]; if (vd?.routes) { let found = false; for (const route of Object.keys(vd.routes)) { const routeShort = parseRoute(route).toUpperCase(); if (routeShort.includes(q) || route.toUpperCase().includes(q)) { found = true; break; } } if (found) { this.mapSearchMatches.add(el.id); continue; } }
         }
         R.render();
     },
     save() { this._persistSave(); MatchIndex.rebuild(this.elements); GitSync.schedulePush(); },
     _persistSave() { GM_setValue(CONFIG.storage.key, JSON.stringify({ elements: this.elements })); },
-    load() { try { const r = GM_getValue(CONFIG.storage.key, null); if (r) this.elements = JSON.parse(r).elements || []; } catch {} for (const el of this.elements) { if (!el.hasOwnProperty('chute')) el.chute = ''; if (!el.hasOwnProperty('maxContainers')) el.maxContainers = 0; } this.editMode = GM_getValue(CONFIG.storage.editModeKey, false); this.legendCollapsed = GM_getValue(CONFIG.storage.legendCollapsedKey, false); this.elementsCollapsed = GM_getValue(CONFIG.storage.elementsCollapsedKey, false); this.loadViewport(); MatchIndex.rebuild(this.elements); },
+    load() { silentCatch('State.load', () => { const r = GM_getValue(CONFIG.storage.key, null); if (r) this.elements = JSON.parse(r).elements || []; }); for (const el of this.elements) { if (!el.hasOwnProperty('chute')) el.chute = ''; if (!el.hasOwnProperty('maxContainers')) el.maxContainers = 0; } this.editMode = GM_getValue(CONFIG.storage.editModeKey, false); this.legendCollapsed = GM_getValue(CONFIG.storage.legendCollapsedKey, false); this.elementsCollapsed = GM_getValue(CONFIG.storage.elementsCollapsedKey, false); this.loadViewport(); MatchIndex.rebuild(this.elements); },
     _vpSaveTimer: null,
     saveViewport() { clearTimeout(this._vpSaveTimer); this._vpSaveTimer = setTimeout(() => { GM_setValue(CONFIG.storage.viewportKey, JSON.stringify({ scale:this.scale, offsetX:this.offsetX, offsetY:this.offsetY })); }, 300); },
-    loadViewport() { try { const r = GM_getValue(CONFIG.storage.viewportKey, null); if (r) { const v = JSON.parse(r); this.scale = v.scale||1; this.offsetX = v.offsetX||0; this.offsetY = v.offsetY||0; } } catch {} },
+    loadViewport() { silentCatch('State.loadViewport', () => { const r = GM_getValue(CONFIG.storage.viewportKey, null); if (r) { const v = JSON.parse(r); this.scale = v.scale||1; this.offsetX = v.offsetX||0; this.offsetY = v.offsetY||0; } }); },
     saveEditMode() { GM_setValue(CONFIG.storage.editModeKey, this.editMode); },
     focusElement(el, zoomLevel) { if (!el) return; const cx = el.x + el.w / 2, cy = el.y + el.h / 2; const ts = zoomLevel || Math.max(State.scale, 2.5); const cw = R.canvas?.width || 800, ch = R.canvas?.height || 600; State.scale = ts; State.offsetX = cw / 2 - cx * ts; State.offsetY = ch / 2 - cy * ts; State.saveViewport(); },
     exportJSON() { const te = {}; for (const [k, v] of Object.entries(ELEMENT_TYPES)) te[k] = { label:v.label, color:v.color, border:v.border, builtIn:!!v.builtIn }; return JSON.stringify({ warehouse:CONFIG.warehouseId, elements:this.elements, types:te, siteSettings:{...SiteSettings}, bgUrl:BgImage.bgUrl||null, exportedAt:new Date().toISOString(), version:'3.3.1' }, null, 2); },
@@ -559,7 +603,7 @@ const State = {
 const SSP = {
     _fetchJSON(url) { return new Promise((resolve, reject) => { GM_xmlhttpRequest({ method:'GET', url, headers:{'Accept':'application/json'}, withCredentials:true, onload(r) { if (r.status >= 200 && r.status < 300) { try { resolve(JSON.parse(r.responseText)); } catch { reject({message:'JSON parse error'}); } } else reject({message:`HTTP ${r.status}`}); }, onerror() { reject({message:'Network error'}); } }); }); },
     _postJSON(url, body) { return new Promise((resolve, reject) => { GM_xmlhttpRequest({ method:'POST', url, headers:{'Accept':'application/json','Content-Type':'application/json'}, data:JSON.stringify(body), withCredentials:true, onload(r) { if (r.status >= 200 && r.status < 300) { try { resolve(JSON.parse(r.responseText)); } catch { reject({message:'JSON parse error'}); } } else reject({message:`HTTP ${r.status}`}); }, onerror() { reject({message:'Network error'}); } }); }); },
-    _parseRoute(raw) { if (!raw) return '—'; let r2 = raw.replace(/^[A-Z0-9]+->/i, ''); r2 = r2.replace(/-(?:H\d|ND|DDU)$/i, ''); return r2; },
+    _parseRoute(raw) { return parseRoute(raw) || '—'; },
     _statusColor(s) { return { 'LOADING_IN_PROGRESS':'#69f0ae','FINISHED_LOADING':'#ffd600','TRAILER_ATTACHED':'#4fc3f7','READY_TO_DEPART':'#ff9800','READY_FOR_LOADING':'#80cbc4','DEPARTED':'#9e9e9e','SCHEDULED':'#5a6a7a','CANCELLED':'#ff5252' }[s]||'#5a6a7a'; },
     _statusShort(s) { return { 'LOADING_IN_PROGRESS':'L','FINISHED_LOADING':'C','TRAILER_ATTACHED':'ATT','READY_TO_DEPART':'RTD','READY_FOR_LOADING':'RFL','DEPARTED':'DEP','SCHEDULED':'S','CANCELLED':'X' }[s]||s; },
     _statusLabel(s) { return { 'LOADING_IN_PROGRESS':'🔄 Loading','FINISHED_LOADING':'✅ Finished','TRAILER_ATTACHED':'🔗 Attached','READY_TO_DEPART':'🚛 Ready','READY_FOR_LOADING':'📋 Ready for Load','DEPARTED':'✈️ Departed','SCHEDULED':'📋 Scheduled','CANCELLED':'❌ Cancelled' }[s]||s; },
@@ -816,7 +860,7 @@ const YMS = {
                 }
             }
             State.ymsLocations = allLocs; State.ymsLocMap = locMap; State.ymsVrIdMap = vrIdMap; State.ymsAnnotationVrIds = annotationVrIds; State.ymsLastUpdated = new Date(); State.ymsLoading = false;
-            UI.updateYmsPanel(); R.render();
+            UI.updateYmsPanel(); R.requestRender();
             const occupied = allLocs.filter(l => l.yardAssets?.length > 0).length;
             UI.setStatus(`🏗️ YMS: ${allLocs.length} loc / ${occupied} occupied / ${Object.keys(vrIdMap).length} VRs`);
             UI.updateDashKpi();
@@ -887,7 +931,7 @@ const VISTA = {
                 const matchedEls = MatchIndex.getMatching(locName);
                 for (const el of matchedEls) { const elKey = el.name || el.id; const pairKey = `${elKey}::${locName}`; if (processedPairs.has(pairKey)) continue; processedPairs.add(pairKey); if (!State.vistaElementMap[elKey]) State.vistaElementMap[elKey] = { totalContainers:0, totalPkgs:0, types:{}, states:{}, routes:{}, maxDwell:0, totalDwell:0, criticalCpt:null, criticalCount:0, locations:[] }; const em = State.vistaElementMap[elKey]; em.totalContainers += locData.totalContainers; em.totalPkgs += locData.totalPkgs; em.maxDwell = Math.max(em.maxDwell, locData.maxDwell); em.totalDwell += locData.totalDwell; em.criticalCount += locData.criticalCount; if (locData.criticalCpt && (!em.criticalCpt || locData.criticalCpt < em.criticalCpt)) em.criticalCpt = locData.criticalCpt; for (const [t, n] of Object.entries(locData.types)) em.types[t] = (em.types[t]||0)+n; for (const [s, n] of Object.entries(locData.states)) em.states[s] = (em.states[s]||0)+n; for (const [r, d] of Object.entries(locData.routes)) { if (!em.routes[r]) em.routes[r] = {count:0,pkgs:0}; em.routes[r].count += d.count; em.routes[r].pkgs += d.pkgs; } em.locations.push(locName); }
             }
-            UI.updateVistaPanel(); R.render();
+            UI.updateVistaPanel(); R.requestRender();
             UI.setStatus(`📦 Vista: ${all.length} containers / ${Object.keys(locMap).length} locations`);
             UI.updateDashKpi();
         } catch (err) {
@@ -902,7 +946,7 @@ const VISTA = {
         for (const c of State.vistaContainers) {
             if (c._state === 'Loaded') continue; if (!c.isClosed && !c.closed) continue;
             if (!c.route || c.route === 'UNKNOWN' || c.route === 'unknown') continue;
-            const rawRoute = c.route; const gKey = routeGroupKey(rawRoute); const subLabel = routeSubLabel(rawRoute); const fullRoute = rawRoute.replace(/^[A-Z0-9]+->/i, '').toUpperCase();
+            const rawRoute = c.route; const gKey = routeGroupKey(rawRoute); const subLabel = routeSubLabel(rawRoute); const fullRoute = parseRoute(rawRoute, { stripSuffix: false }).toUpperCase();
             if (!groups[gKey]) groups[gKey] = { key: gKey, totalContainers: 0, totalPkgs: 0, types: {}, states: {}, locations: {}, maxDwell: 0, totalDwell: 0, subRoutes: {} };
             const g = groups[gKey]; g.totalContainers++; g.totalPkgs += c.childCount || 0; g.types[c.type] = (g.types[c.type] || 0) + 1; g.states[c._state] = (g.states[c._state] || 0) + 1; if (c.dwellTimeInMinutes > g.maxDwell) g.maxDwell = c.dwellTimeInMinutes; g.totalDwell += c.dwellTimeInMinutes || 0;
             const loc = c.location || 'UNKNOWN'; if (!g.locations[loc]) g.locations[loc] = { count: 0, pkgs: 0 }; g.locations[loc].count++; g.locations[loc].pkgs += c.childCount || 0;
@@ -979,7 +1023,7 @@ const FMC = {
             console.log(`[ShipMap:FMC] ✅ ${tours.length} tours | IB:${summary.inbound.total} OB:${summary.outbound.total} yard:${summary.yardNow}`);
         } catch (err) { console.error(`[ShipMap:FMC] ❌ ${err.message || err}`); }
         this.loading = false;
-        UI.updateFmcPanel(); UI.updateDashKpi(); R.render();
+        UI.updateFmcPanel(); UI.updateDashKpi(); R.requestRender();
         if (this.tours.length) { UI.setStatus(`🚛 FMC: ${this.tours.length} tours`); }
         // Refresh loads panel — classification may have changed
         if (State.activeTab === 'loads') UI.updateDataPanel();
@@ -1042,7 +1086,7 @@ const FMC = {
     _parseTime(val) {
         if (!val) return null;
         if (/^\d{12,13}$/.test(val)) return parseInt(val);
-        try { const d = new Date(val); if (!isNaN(d.getTime())) return d.getTime(); } catch {}
+        try { const d = new Date(val); if (!isNaN(d.getTime())) return d.getTime(); } catch (e) { console.debug('[ShipMap:FMC] date parse:', e.message); }
 const m = val.match(/(\d{1,2})[\/\-.](\d{1,2})[\/\-.](\d{2,4})\s+(\d{1,2}):(\d{2})/);
 
         if (m) { const y = m[3].length === 2 ? 2000 + parseInt(m[3]) : parseInt(m[3]); const d = new Date(y, parseInt(m[2]) - 1, parseInt(m[1]), parseInt(m[4]), parseInt(m[5])); if (!isNaN(d.getTime())) return d.getTime(); }
@@ -1247,7 +1291,7 @@ _classifyTour(tour) {
     const site = CONFIG.warehouseId.toUpperCase();
     const allTypes = [...tour.businessTypesList, ...tour.shippers];
 
-    // ── IB: TransfersInventoryCorrection → always IB  (NEW v3.3.1a)
+    // ── IB: TransfersInventoryCorrection → always IB  (NEW v3.4.0a)
     const isInvCorrection = allTypes.some(s => {
         const u = s.toUpperCase().trim();
         return u.startsWith('TRANSFERSINVENTORYCORRECTION')
@@ -1301,7 +1345,7 @@ _classifyTour(tour) {
     getUpcoming(hours = 4) { const now = Date.now(), cutoff = now + hours * 3600000; return this.tours.filter(t => !t.hasArrived && t.plannedYardArrival && t.plannedYardArrival > now - 3600000 && t.plannedYardArrival < cutoff).sort((a, b) => a.plannedYardArrival - b.plannedYardArrival); },
 
     // ── Lifecycle ──
-    start() { this.stopAutoRefresh(); this.fetchData(); this._autoTimer = setInterval(() => this.fetchData(), 120000); },
+    start() { this.stopAutoRefresh(); this.fetchData(); this._autoTimer = setInterval(() => this.fetchData(), CONFIG.data.fmcRefreshInterval); },
     stopAutoRefresh() { if (this._autoTimer) { clearInterval(this._autoTimer); this._autoTimer = null; } },
 };
     // ============================================================
@@ -1311,7 +1355,7 @@ const Dockmaster = {
     appointments: [], lastUpdated: null, loading: false,
     _autoTimer: null,
 
-    _baseUrl: 'https://fc-inbound-dock-execution-service-eu-eug1-dub.dub.proxy.amazon.com',
+    _baseUrl: CONFIG.urls.dockmaster,
 
     async fetchData(daysBack = 0, daysForward = 0) {
         if (this.loading) return; // prevent double fetch
@@ -1392,7 +1436,7 @@ const Dockmaster = {
             try {
                 const d = new Date(`${dateObj.date.replace(/\//g, '-')}T${dateObj.time}`);
                 if (!isNaN(d.getTime())) return d.getTime();
-            } catch {}
+            } catch (e) { console.debug('[ShipMap:DM] date parse:', e.message); }
         }
         return null;
     },
@@ -1516,7 +1560,7 @@ const Dockmaster = {
         this.stopAutoRefresh();
         // Delay first fetch to let other modules load first
         setTimeout(() => this.fetchData(0, 0), 2000);
-        this._autoTimer = setInterval(() => this.fetchData(0, 1), 120000); // 3 min
+        this._autoTimer = setInterval(() => this.fetchData(0, 1), CONFIG.data.dockmasterRefreshInterval); // 2 min
     },
 
 
@@ -1530,7 +1574,7 @@ const Dockmaster = {
 const RELAT = {
     tasks: [], lastUpdated: null, loading: false,
     _autoTimer: null,
-    _baseUrl: 'https://eu.relat.aces.amazon.dev',
+    _baseUrl: CONFIG.urls.relat,
     completedVrIds: new Set(),
 
     async fetchData(daysBack = 3, daysForward = 0) {
@@ -1612,7 +1656,7 @@ _buildCompletedSet(rawList) {
     start() {
         this.stopAutoRefresh();
         this.fetchData(3, 0);
-        this._autoTimer = setInterval(() => this.fetchData(3, 0), 180000);
+        this._autoTimer = setInterval(() => this.fetchData(3, 0), CONFIG.data.relatRefreshInterval);
     },
 
     stopAutoRefresh() {
@@ -1769,7 +1813,7 @@ const Summary = {
         t += `\n📦 VISTA: ${d.vista.total} containers / ${d.vista.totalPkgs} pkgs\n 📥 Stacked: ${d.vista.stacked} 📤 Staged: ${d.vista.staged} 🚛 Loaded: ${d.vista.loaded}\n ⏱ Avg dwell: ${d.vista.avgDwell}m Max: ${d.vista.maxDwell}m\n 🟢${d.vista.congestion.low} 🟡${d.vista.congestion.medium} 🟠${d.vista.congestion.high} 🔴${d.vista.congestion.critical}\n\n`;
         if (d.vista.topCongested.length) { t += `🔴 TOP CONGESTED:\n`; for (const [loc, ld] of d.vista.topCongested) t += ` ${loc}: ${ld.totalContainers} cnt / ${ld.totalPkgs} pkg / ${ld.maxDwell}m dwell\n`; t += '\n'; }
         if (d.vista.topDwell.length) { t += `⏱ LONGEST DWELL:\n`; for (const [loc, ld] of d.vista.topDwell) t += ` ${loc}: ${ld.maxDwell}m / ${ld.totalContainers} cnt\n`; }
-        t += `\n${'═'.repeat(50)}\nGenerated: ${d.now.toLocaleString()} | Ship Map v3.3.1`; return t;
+        t += `\n${'═'.repeat(50)}\nGenerated: ${d.now.toLocaleString()} | Ship Map v3.4.0`; return t;
     },
 
 };
@@ -1812,7 +1856,7 @@ const Trend = {
         const data = this._load(); data.push(snapshot); while (data.length > this._maxSnapshots) data.shift(); this._save(data);
     },
 
-    _load() { try { const raw = GM_getValue(CONFIG.storage.trendKey, null); if (raw) return JSON.parse(raw); } catch {} return []; },
+    _load() { return silentCatch('Trend.load', () => { const raw = GM_getValue(CONFIG.storage.trendKey, null); if (raw) return JSON.parse(raw); }) || []; },
 
     _save(data) { GM_setValue(CONFIG.storage.trendKey, JSON.stringify(data)); },
 
@@ -1943,6 +1987,12 @@ const Minimap = {
 // ============================================================
 const R = {
     canvas: null, ctx: null,
+    _renderScheduled: false,
+    requestRender() {
+        if (this._renderScheduled) return;
+        this._renderScheduled = true;
+        requestAnimationFrame(() => { this._renderScheduled = false; this.render(); });
+    },
     init(cid) { this.canvas = document.createElement('canvas'); document.getElementById(cid).appendChild(this.canvas); this.ctx = this.canvas.getContext('2d'); this.resize(); window.addEventListener('resize', () => this.resize()); this._bindEvents(); },
     resize() { const p = this.canvas.parentElement; this.canvas.width = p.clientWidth; this.canvas.height = p.clientHeight; this.render(); },
     render() {
@@ -2210,7 +2260,7 @@ _drawElements() {
             if (vistaData.routes) {
                 const routeEntries = Object.entries(vistaData.routes).sort((a, b) => b[1].count - a[1].count);
                 for (const [r2, d2] of routeEntries) {
-                    const rShort = r2.replace(/^[A-Z0-9]+->/i, '').replace(/-(?:H\d|ND|DDU)$/i, '');
+                    const rShort = parseRoute(r2);
                     lines.push({ text:`→ ${rShort} ×${d2.count} (${d2.pkgs}pkg)`, color:'#546E7A', font:'9px "Amazon Ember",Arial,sans-serif' });
                 }
             }
@@ -2922,14 +2972,14 @@ select.tsel{background:#37475a;color:#e0e0e0;border:1px solid #4a5a6a;padding:4p
             try { const p = decodeJwtPayload(tok); if (p.iss !== 'YMS-1.0') return false; if (!p.exp || p.exp < Date.now() / 1000 + 60) return false; const tokenYard = p.context?.yard?.toUpperCase(); if (tokenYard && tokenYard !== wh) return false; if (YMS._token !== tok) { YMS._setToken(tok); if (!State.ymsAutoTimer) YMS.startAutoRefresh(); } return true; } catch { return false; }
         };
         if (!pickupToken()) YMS.autoFetchToken();
-        setInterval(pickupToken, 10000);
+        Lifecycle.register('yms-token-pickup', pickupToken, CONFIG.data.ymsTokenPickupInterval);
         SSP.startAutoRefresh();
         if (YMS._token) YMS.startAutoRefresh();
         VISTA.startAutoRefresh();
         setTimeout(() => FMC.start(), 8000);
         setTimeout(() => Dockmaster.start(), 8000);
               setTimeout(() => RELAT.start(), 10000);
-        setInterval(() => { if (State.sspLoads.length) this.updateDataPanel(); }, 60000);
+        Lifecycle.register('ui-panel-refresh', () => { if (State.sspLoads.length) this.updateDataPanel(); }, CONFIG.data.uiRefreshInterval);
         Trend.start();
     },  // ← ZAMKNIĘCIE _initDataPanel — PRZECINEK
 
@@ -3743,7 +3793,7 @@ ${eyeBtn}
                     if (c2.descPkgs === 0 && c2.childCount === 0) emptyCount++;
                     contentCount += c2.descPkgs || c2.childCount;
                 }
-                if (c2.assocTime) { try { const t2 = new Date(c2.assocTime); if (!isNaN(t2.getTime()) && (!earliestAssoc || t2 < earliestAssoc)) earliestAssoc = t2; } catch {} }
+                if (c2.assocTime) { try { const t2 = new Date(c2.assocTime); if (!isNaN(t2.getTime()) && (!earliestAssoc || t2 < earliestAssoc)) earliestAssoc = t2; } catch (e) { console.debug('[ShipMap] assocTime parse:', e.message); } }
             }
 
             const hasCont = Object.keys(groups).length > 0, isDwell = !hasCont && loosePkgs > 0;
@@ -4423,7 +4473,7 @@ ${ymsTrailers.length ? `<div class="handover-section">
 
 </div>
 <div class="handover-footer">
-<span style="font-size:10px;color:#5a6a7a">📋 ${CONFIG.warehouseId} · ${shift.label} · ${new Date().toLocaleString()} · v3.3.1</span>
+<span style="font-size:10px;color:#5a6a7a">📋 ${CONFIG.warehouseId} · ${shift.label} · ${new Date().toLocaleString()} · v3.4.0</span>
 <div style="display:flex;gap:6px"><button class="btn sm" id="handover-copy">📋 Copy</button></div>
 </div>
 </div>`;
@@ -4488,7 +4538,7 @@ ${ymsTrailers.length ? `<div class="handover-section">
                 for (const t of ymsTrailers) text += `  ${t.location}: ${t.type} · ${t.owner} · ${t.vrId || '—'} · ${t.status}\n`;
             }
 
-            text += `\n${'═'.repeat(50)}\n${new Date().toLocaleString()} · Ship Map v3.3.1`;
+            text += `\n${'═'.repeat(50)}\n${new Date().toLocaleString()} · Ship Map v3.4.0`;
 
             navigator.clipboard.writeText(text).then(() => {
                 const btn = document.getElementById('handover-copy');
@@ -4705,7 +4755,7 @@ ${ymsTrailers.length ? `<div class="handover-section">
             </div>
             <div class="maps-footer">
                 <span>GitHub: homziukl/Ship-Map-Builder</span>
-                <span>v3.3.1</span>
+                <span>v3.4.0</span>
             </div>
         </div>`;
 
@@ -5027,7 +5077,7 @@ printStages() {
 <div class="meta"><span>&#x1F69B; <b>${load.vrId || '&mdash;'}</b></span><span>${load.status.replace(/_/g, ' ')}</span><span>&#x1F6AA; <b>${load.dockDoor !== '—' ? load.dockDoor : '&mdash;'}</b></span><span>SDT: <b>${load.sdt !== '—' ? load.sdt : '&mdash;'}</b></span><span>${ymsInfo}</span><span>${shift.label} ${fmtTime(shift.startDate)}&rarr;${fmtTime(shift.endDate)}</span></div>
 ${sspRows.length ? `<h2>&#x1F4CB; This load (SSP)</h2><table><thead><tr><th>Location</th><th>Containers</th><th>Routes</th></tr></thead><tbody>${sspTableRows}<tr class="total"><td>TOTAL</td><td>${sspGrandCnt} (${sspGrandStr})</td><td>${sspRows.length} locations</td></tr></tbody></table>` : '<p style="color:#888;font-style:italic;margin:12px 0">No staged containers for this load</p>'}
 ${vistaLocs.length ? `<h2>&#x1F4E6; Other CPTs for ${load.route} (Vista) <span class="badge">${vistaGrandCnt} cnt</span></h2><div class="vista-note">Containers from other CPTs currently on stage locations (excluding this load)</div><table><thead><tr><th>Location</th><th>Containers</th><th>Packages</th><th>Max Dwell</th><th>CPTs</th></tr></thead><tbody>${vistaTableRows}<tr class="total"><td>TOTAL</td><td>${vistaGrandCnt} (${vistaGrandStr})</td><td class="pkg-count">${vistaGrandPkgs}</td><td></td><td></td></tr></tbody></table>` : ''}
-<div class="footer"><span>${CONFIG.warehouseId} &middot; ${now.toLocaleString()} &middot; Ship Map v3.3.1</span></div>
+<div class="footer"><span>${CONFIG.warehouseId} &middot; ${now.toLocaleString()} &middot; Ship Map v3.4.0</span></div>
 <div class="no-print"><button onclick="window.print()" style="padding:10px 24px;font-size:14px;cursor:pointer;background:#ff9900;border:none;color:#000;border-radius:6px;font-weight:bold">&#x1F5A8;&#xFE0F; Print</button></div>
 </body></html>`;
 
@@ -5108,14 +5158,14 @@ ${vistaLocs.length ? `<h2>&#x1F4E6; Other CPTs for ${load.route} (Vista) <span c
             app.classList.add('dashboard-mode');
             dashBtn.classList.add('on');
             dashBtn.textContent = '📺 Exit';
-            try { document.documentElement.requestFullscreen?.(); } catch {}
+            try { document.documentElement.requestFullscreen?.(); } catch (e) { console.debug('[ShipMap] fullscreen:', e.message); }
             this.updateDashKpi();
             this._dashKpiTimer = setInterval(() => this.updateDashKpi(), 10000);
         } else {
             app.classList.remove('dashboard-mode');
             dashBtn.classList.remove('on');
             dashBtn.textContent = '📺';
-            try { if (document.fullscreenElement) document.exitFullscreen?.(); } catch {}
+            try { if (document.fullscreenElement) document.exitFullscreen?.(); } catch (e) { console.debug('[ShipMap] exitFullscreen:', e.message); }
             clearInterval(this._dashKpiTimer);
         }
         this._applySbLayout();
@@ -5505,7 +5555,7 @@ function bootMain() {
     R.init('cvs');
     R.render();
     UI.refreshList();
-    UI.setStatus(`✅ v3.3.1 | ${State.elements.length} el | ${State.editMode ? '🔓' : '🔒'}`);
+    UI.setStatus(`✅ v3.4.0 | ${State.elements.length} el | ${State.editMode ? '🔓' : '🔒'}`);
     try { Minimap.init(); } catch(e) { console.warn('[Minimap] init failed:', e); }
     try { GitSync.init(); } catch(e) { console.warn('[GitSync] init failed:', e); }
 try { unsafeWindow.__SM = { State, YMS, FMC, Dockmaster, RELAT, MapManager, MatchIndex, ymsGetVrIds }; } catch(e) {}
