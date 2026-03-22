@@ -171,6 +171,7 @@ const CONFIG = {
         dockmaster: 'https://fc-inbound-dock-execution-service-eu-eug1-dub.dub.proxy.amazon.com',
         relat: 'https://eu.relat.aces.amazon.dev',
     },
+    fmcFallbackSite: 'AT1hgc',
     maxUndoSteps: 50,
 };
 
