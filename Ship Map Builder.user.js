@@ -2,7 +2,7 @@
 // @name         Ship Map Builder
 // @namespace    http://tampermonkey.net/
 // @version      3.4.1
-// @description  Ship Map + SSP + YMS + Vista + FMC integration
+// @description  Ship Map + SSP + YMS + Vista + FMC + STEM integration
 // @author       homziukl
 // @match        https://stem-eu.corp.amazon.com/url*
 // @match        https://trans-logistics-eu.amazon.com/yms/*
@@ -2324,8 +2324,8 @@ _drawElements() {
                 }
             }
 
-            // ── STEM badge (chutes only, no highlight, no dim, no focus) ──
-            if (CONFIG.data.stemEnabled && el.type === 'chute' && !isHL && !dimmed && !searchDimmed && !focusData && el.w >= 60 && el.h >= 28) {
+            // ── STEM badge (chutes + BG + BOX, no highlight, no dim, no focus) ──
+            if (CONFIG.data.stemEnabled && (el.type === 'chute' || /\bBG\b|\bBOX\b/i.test(el.name || '')) && !isHL && !dimmed && !searchDimmed && !focusData && el.w >= 60 && el.h >= 28) {
                 const sd = State.stemElementMap?.[el.name || el.id];
                 if (sd) {
                     const hasVista = State.vistaElementMap?.[el.name || el.id]?.totalContainers > 0;
@@ -2428,8 +2428,8 @@ _drawElements() {
             }
         }
 // ← koniec if (vistaData && vistaData.totalContainers > 0)        }
-        // STEM sortation data (chutes only)
-        if (CONFIG.data.stemEnabled && el.type === 'chute') {
+        // STEM sortation data (chutes + BG + BOX)
+        if (CONFIG.data.stemEnabled && (el.type === 'chute' || /\bBG\b|\bBOX\b/i.test(el.name || ''))) {
             const stemData = State.stemElementMap?.[el.name || el.id];
             if (stemData) {
                 lines.push({ text: '── STEM ──', color: '#5a6a7a', font: '9px "Amazon Ember",Arial,sans-serif' });
