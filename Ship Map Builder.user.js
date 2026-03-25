@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Ship Map Builder
 // @namespace    http://tampermonkey.net/
-// @version      3.4.0
+// @version      3.4.1
 // @description  Ship Map + SSP + YMS + Vista + FMC integration
 // @author       homziukl
 // @match        https://stem-eu.corp.amazon.com/url*
@@ -166,7 +166,7 @@ const CONFIG = {
         vistaCollapsedKey: 'shipmap_vista_collapsed', sidebarWidthKey: 'shipmap_sidebar_width',
         trendKey: 'shipmap_trend_v1', minimapKey: 'shipmap_minimap_visible',
     },
-    data: { refreshInterval: 120000, ymsRefreshInterval: 60000, vistaRefreshInterval: 120000, trendInterval: 600000, fmcRefreshInterval: 120000, dockmasterRefreshInterval: 120000, relatRefreshInterval: 180000, ymsTokenCaptureInterval: 30000, ymsTokenPickupInterval: 10000, uiRefreshInterval: 60000 },
+    data: { refreshInterval: 120000, ymsRefreshInterval: 60000, vistaRefreshInterval: 120000, trendInterval: 600000, fmcRefreshInterval: 120000, dockmasterRefreshInterval: 120000, relatRefreshInterval: 180000, ymsTokenCaptureInterval: 30000, ymsTokenPickupInterval: 10000, uiRefreshInterval: 60000, stemRefreshInterval: 120000, stemEnabled: true, stemGraphqlUrl: '/graphql' },
     urls: {
         dockmaster: 'https://fc-inbound-dock-execution-service-eu-eug1-dub.dub.proxy.amazon.com',
         relat: 'https://eu.relat.aces.amazon.dev',
@@ -457,6 +457,7 @@ const State = {
     loadsSubTab: 'ob',  // 'ob' | 'noninv' | 'ib'
     vistaContainers: [], vistaLocMap: {}, vistaElementMap: {},
     vistaLastUpdated: null, vistaLoading: false, vistaAutoTimer: null, vistaEnabled: true,
+    stemElementMap: {}, stemLastUpdated: null, stemLoading: false,
     mapSearch: '', mapSearchMatches: new Set(),
     hideOldDeparted: true, oldDepartedMinutes: 60,
     dashboardMode: false,
@@ -581,6 +582,7 @@ const State = {
             const ymsLoc = this.getYmsForElement(el);
             if (ymsLoc?.yardAssets?.length) { let found = false; for (const asset of ymsLoc.yardAssets) { if (asset.type === 'TRACTOR') continue; const owner = (asset.owner?.code || asset.owner?.shortName || asset.broker?.code || '').toUpperCase(); const plate = (asset.licensePlateIdentifier?.registrationIdentifier || asset.vehicleNumber || '').toUpperCase(); const atype = (asset.type || '').toUpperCase().replace(/_/g, ' '); const ann = (asset.annotation || '').toUpperCase(); const vrIds = ymsGetVrIds(asset); const lane = (asset.load?.lane || asset.load?.routes?.[0] || '').toUpperCase(); if (owner.includes(q) || plate.includes(q) || atype.includes(q) || ann.includes(q) || lane.includes(q) || vrIds.some(v => v.includes(q))) { found = true; break; } } if (found) { this.mapSearchMatches.add(el.id); continue; } }
             const vd = this.vistaElementMap?.[el.name || el.id]; if (vd?.routes) { let found = false; for (const route of Object.keys(vd.routes)) { const routeShort = parseRoute(route).toUpperCase(); if (routeShort.includes(q) || route.toUpperCase().includes(q)) { found = true; break; } } if (found) { this.mapSearchMatches.add(el.id); continue; } }
+            const sd = this.stemElementMap?.[el.name || el.id]; if (sd) { const dir = (sd.direction || '').toUpperCase(); const allDirs = (sd.allDirections || []).join(' ').toUpperCase(); const login = (sd.userLogin || '').toUpperCase(); if (dir.includes(q) || allDirs.includes(q) || login.includes(q) || (sd.chuteLabel || '').toUpperCase().includes(q)) { this.mapSearchMatches.add(el.id); continue; } }
         }
         R.render();
     },
@@ -958,6 +960,148 @@ const VISTA = {
     },
     startAutoRefresh() { this.stopAutoRefresh(); this.fetchData(); State.vistaAutoTimer = setInterval(() => this.fetchData(), CONFIG.data.vistaRefreshInterval); },
     stopAutoRefresh() { if (State.vistaAutoTimer) { clearInterval(State.vistaAutoTimer); State.vistaAutoTimer = null; } },
+};
+
+// ============================================================
+// STEM — Sortation rules from STEM GraphQL API
+// ============================================================
+const STEM_RESERVATIONS_QUERY = `query Reservations($nodeId: String!) { reservations(nodeId: $nodeId, cached: true) { reservationId stackingFilters startTime endTime lastUpdateTime userLogin reservationProperties { key value } resources { resourceId label resourceType } } }`;
+const STEM_RESOURCES_QUERY = `query Resources($nodeId: String!, $resourceType: String) { resources(nodeId: $nodeId, resourceType: $resourceType) { resourceId label resourceType properties { key value } } }`;
+
+function epochMsToTime(ms) {
+    if (!ms) return null;
+    try { const d = new Date(ms); return d.toLocaleTimeString('pl-PL', { hour: '2-digit', minute: '2-digit' }); }
+    catch { return null; }
+}
+
+const STEM = {
+    _csrfToken: null,
+    _autoTimer: null,
+
+    async _fetchCsrf() {
+        const r = await fetch('/csrfToken', { credentials: 'same-origin' });
+        if (r.status === 401 || r.status === 403) throw new Error(`STEM auth failed (${r.status})`);
+        if (!r.ok) throw new Error(`STEM CSRF error (${r.status})`);
+        const token = (await r.text()).trim();
+        if (!token) throw new Error('STEM CSRF token empty');
+        this._csrfToken = token;
+        return token;
+    },
+
+    async _gql(query, variables) {
+        const ctrl = new AbortController();
+        const timer = setTimeout(() => ctrl.abort(), 30000);
+        try {
+            const r = await fetch(CONFIG.data.stemGraphqlUrl, {
+                method: 'POST',
+                headers: { 'anti-csrftoken-a2z': this._csrfToken, 'Content-Type': 'application/json', 'Accept': '*/*' },
+                body: JSON.stringify({ query, variables }),
+                credentials: 'same-origin',
+                signal: ctrl.signal,
+            });
+            clearTimeout(timer);
+            if (r.status === 401 || r.status === 403) throw new Error(`403`);
+            if (!r.ok) throw new Error(`STEM GraphQL HTTP ${r.status}`);
+            const json = await r.json();
+            if (json.errors?.length) {
+                console.warn('[ShipMap:STEM] GraphQL errors:', json.errors.map(e => e.message).join('; '));
+                return {};
+            }
+            return json.data || {};
+        } catch (err) {
+            clearTimeout(timer);
+            if (err.name === 'AbortError') throw new Error('STEM timeout (30s)');
+            throw err;
+        }
+    },
+
+    _mergeData(reservations, resources) {
+        const map = new Map();
+        // Reservations → assigned chutes
+        for (const r of (reservations || [])) {
+            const res = r.resources || [];
+            const label = res[0]?.label || '';
+            if (!label) continue;
+            const sf = r.stackingFilters || [];
+            const allDirs = sf.map(s => simplifyStackingFilter(s)).filter(Boolean);
+            map.set(label.toUpperCase(), {
+                chuteLabel: label,
+                assigned: true,
+                direction: allDirs[0] || '',
+                allDirections: allDirs,
+                startTime: epochMsToTime(r.startTime),
+                endTime: epochMsToTime(r.endTime),
+                userLogin: r.userLogin || '',
+                reservationId: r.reservationId || '',
+            });
+        }
+        // Resources → fill unassigned chutes
+        for (const res of (resources || [])) {
+            const label = res.label || '';
+            if (!label) continue;
+            const key = label.toUpperCase();
+            if (!map.has(key)) {
+                map.set(key, {
+                    chuteLabel: label,
+                    assigned: false,
+                    direction: '',
+                    allDirections: [],
+                    startTime: null,
+                    endTime: null,
+                    userLogin: '',
+                    reservationId: '',
+                });
+            }
+        }
+        return map;
+    },
+
+    async fetchData(retryCount = 0) {
+        if (!CONFIG.data.stemEnabled) return;
+        if (State.stemLoading) return;
+        State.stemLoading = true;
+        try {
+            if (!this._csrfToken) await this._fetchCsrf();
+            const [resResult, resourceResult] = await Promise.allSettled([
+                this._gql(STEM_RESERVATIONS_QUERY, { nodeId: CONFIG.warehouseId }),
+                this._gql(STEM_RESOURCES_QUERY, { nodeId: CONFIG.warehouseId, resourceType: 'CHUTE' }),
+            ]);
+            const reservations = resResult.status === 'fulfilled' ? (resResult.value.reservations || []) : [];
+            const resources = resourceResult.status === 'fulfilled' ? (resourceResult.value.resources || []) : [];
+            if (resResult.status === 'rejected') console.warn('[ShipMap:STEM] Reservations failed:', resResult.reason?.message);
+            if (resourceResult.status === 'rejected') console.warn('[ShipMap:STEM] Resources failed:', resourceResult.reason?.message);
+            if (resResult.status === 'rejected' && resourceResult.status === 'rejected') {
+                console.error('[ShipMap:STEM] Both queries failed, keeping previous data');
+                return;
+            }
+            const merged = this._mergeData(reservations, resources);
+            const newMap = {};
+            for (const [, chuteData] of merged) {
+                const matched = MatchIndex.getMatching(chuteData.chuteLabel);
+                for (const el of matched) {
+                    const elKey = el.name || el.id;
+                    newMap[elKey] = { ...chuteData };
+                }
+            }
+            State.stemElementMap = newMap;
+            State.stemLastUpdated = new Date();
+            const assigned = [...merged.values()].filter(c => c.assigned).length;
+            console.log(`[ShipMap:STEM] ✅ ${merged.size} chutes (${assigned} assigned), ${Object.keys(newMap).length} mapped`);
+            R.requestRender();
+        } catch (err) {
+            if (err.message?.includes('403') && this._csrfToken && retryCount < 1) {
+                this._csrfToken = null;
+                State.stemLoading = false;
+                return this.fetchData(retryCount + 1);
+            }
+            console.error('[ShipMap:STEM]', err.message);
+        } finally {
+            State.stemLoading = false;
+        }
+    },
+
+    startAutoRefresh() { this.stopAutoRefresh(); this.fetchData(); this._autoTimer = setInterval(() => this.fetchData(), CONFIG.data.stemRefreshInterval); },
+    stopAutoRefresh() { if (this._autoTimer) { clearInterval(this._autoTimer); this._autoTimer = null; } },
 };
 
 // ============================================================
@@ -2180,6 +2324,23 @@ _drawElements() {
                 }
             }
 
+            // ── STEM badge (chutes only, no highlight, no dim, no focus) ──
+            if (CONFIG.data.stemEnabled && el.type === 'chute' && !isHL && !dimmed && !searchDimmed && !focusData && el.w >= 60 && el.h >= 28) {
+                const sd = State.stemElementMap?.[el.name || el.id];
+                if (sd) {
+                    const hasVista = State.vistaElementMap?.[el.name || el.id]?.totalContainers > 0;
+                    const yBase = el.chute
+                        ? (el.h >= (hasVista ? 64 : 52) ? el.y + (hasVista ? 56 : 44) : (el.h >= (hasVista ? 40 : 28) ? el.y + (hasVista ? 40 : 28) : null))
+                        : (el.h >= (hasVista ? 50 : 38) ? el.y + (hasVista ? 40 : 28) : null);
+                    if (yBase) {
+                        ctx.font = 'bold 8px "Amazon Ember",Arial,sans-serif';
+                        ctx.fillStyle = sd.assigned ? '#00bcd4' : '#78909C';
+                        const label = sd.assigned ? `🔀${sd.direction}` : '🔀⊘';
+                        ctx.fillText(label, el.x + 4, yBase);
+                    }
+                }
+            }
+
             // ── Focus mode badge ──
             if (focusData && !isHL && !dimmed && el.w >= 60 && el.h >= 28) {
                 const focusBadge = focusEntries.map(([route, data]) => `${route}:${data.count}`).join(' ');
@@ -2267,6 +2428,27 @@ _drawElements() {
             }
         }
 // ← koniec if (vistaData && vistaData.totalContainers > 0)        }
+        // STEM sortation data (chutes only)
+        if (CONFIG.data.stemEnabled && el.type === 'chute') {
+            const stemData = State.stemElementMap?.[el.name || el.id];
+            if (stemData) {
+                lines.push({ text: '── STEM ──', color: '#5a6a7a', font: '9px "Amazon Ember",Arial,sans-serif' });
+                if (stemData.assigned) {
+                    lines.push({ text: `🔀 ${stemData.direction}`, color: '#00bcd4', font: 'bold 11px "Amazon Ember",Arial,sans-serif' });
+                    if (stemData.allDirections.length > 1) {
+                        lines.push({ text: `+ ${stemData.allDirections.slice(1).join(', ')}`, color: '#80deea', font: '9px "Amazon Ember",Arial,sans-serif' });
+                    }
+                    if (stemData.startTime || stemData.endTime) {
+                        lines.push({ text: `⏱ ${stemData.startTime || '?'} → ${stemData.endTime || '?'}`, color: '#8899aa', font: '10px "Amazon Ember",Arial,sans-serif' });
+                    }
+                    if (stemData.userLogin) {
+                        lines.push({ text: `👤 ${stemData.userLogin}`, color: '#78909C', font: '9px "Amazon Ember",Arial,sans-serif' });
+                    }
+                } else {
+                    lines.push({ text: '⊘ Brak przypisania', color: '#78909C', font: '10px "Amazon Ember",Arial,sans-serif' });
+                }
+            }
+        }
         // FMC cross-ref
         const ymsLoc2 = State.getYmsForElement(el);
         if (ymsLoc2?.yardAssets?.length && FMC.tours.length) {
@@ -2338,6 +2520,8 @@ _drawElements() {
         if (State.ymsLastUpdated) { const t = '🏗️YMS', tw = ctx.measureText(t).width+20; ctx.fillStyle = 'rgba(0,0,0,0.5)'; ctx.beginPath(); ctx.roundRect(cx, c.height-42, tw, 28, 6); ctx.fill(); ctx.fillStyle = '#69f0ae'; ctx.fillText(t, cx+10, c.height-28); cx += tw+10; }
 
         if (State.vistaLastUpdated) { const t = '📦VIS', tw = ctx.measureText(t).width+20; ctx.fillStyle = 'rgba(0,0,0,0.5)'; ctx.beginPath(); ctx.roundRect(cx, c.height-42, tw, 28, 6); ctx.fill(); ctx.fillStyle = '#ff9100'; ctx.fillText(t, cx+10, c.height-28); cx += tw+10; }
+
+        if (State.stemLastUpdated) { const t = '🔀STEM', tw = ctx.measureText(t).width+20; ctx.fillStyle = 'rgba(0,0,0,0.5)'; ctx.beginPath(); ctx.roundRect(cx, c.height-42, tw, 28, 6); ctx.fill(); ctx.fillStyle = '#00bcd4'; ctx.fillText(t, cx+10, c.height-28); cx += tw+10; }
 
         if (FMC.lastUpdated) { const t = `🚛FMC:${FMC.tours.length}`, tw = ctx.measureText(t).width+20; ctx.fillStyle = 'rgba(0,0,0,0.5)'; ctx.beginPath(); ctx.roundRect(cx, c.height-42, tw, 28, 6); ctx.fill(); ctx.fillStyle = '#e040fb'; ctx.fillText(t, cx+10, c.height-28); cx += tw+10; }
         if (State.focusRoutes.size > 0) {
@@ -2931,7 +3115,7 @@ select.tsel{background:#37475a;color:#e0e0e0;border:1px solid #4a5a6a;padding:4p
     },
 
     _initDataPanel() {
-        document.getElementById('b-refresh').onclick=()=>{ SSP.fetchData(); if(YMS._token) YMS.fetchData(); VISTA.fetchData(); FMC.fetchData(); };
+        document.getElementById('b-refresh').onclick=()=>{ SSP.fetchData(); if(YMS._token) YMS.fetchData(); VISTA.fetchData(); FMC.fetchData(); if(CONFIG.data.stemEnabled) STEM.fetchData(); };
         document.getElementById('b-yms-refresh').onclick=()=>{ if(YMS._token) YMS.fetchData(); };
         document.getElementById('drawer-close').onclick=()=>this.closeDrawer();
                 document.getElementById('drawer-print')?.addEventListener('click', () => this.printStages());
@@ -2980,6 +3164,7 @@ select.tsel{background:#37475a;color:#e0e0e0;border:1px solid #4a5a6a;padding:4p
         setTimeout(() => FMC.start(), 8000);
         setTimeout(() => Dockmaster.start(), 8000);
               setTimeout(() => RELAT.start(), 10000);
+        if (CONFIG.data.stemEnabled) setTimeout(() => STEM.startAutoRefresh(), 5000);
         Lifecycle.register('ui-panel-refresh', () => { if (State.sspLoads.length) this.updateDataPanel(); }, CONFIG.data.uiRefreshInterval);
         Trend.start();
     },  // ← ZAMKNIĘCIE _initDataPanel — PRZECINEK
@@ -3908,13 +4093,35 @@ ${eyeBtn}
             vistaHtml = `<div class="other-cpt-section"><div class="other-cpt-header" id="other-cpt-toggle"><span>📦 Other CPTs on stages for <b>${load.route}</b> · ${vistaGrandCnt} cnt</span><span class="other-cpt-count">${vistaLocs.length}</span></div><div class="other-cpt-body" id="other-cpt-body" style="display:none"><table class="dtable"><thead><tr><th>Location</th><th>Content &amp; CPT</th><th>Dwell</th></tr></thead><tbody>${vistaTableRows}<tr class="vista-total-row"><td style="font-weight:bold;color:#ff9900">TOTAL</td><td><div class="dr-content">${grandTypesStr}<span style="font-size:9px;color:#ff9900;margin-left:4px">${vistaGrandPkgs}pkg</span></div></td><td></td></tr></tbody></table></div></div>`;
         }
 
-        document.getElementById('drawer-body').innerHTML = `<table class="dtable"><thead><tr><th class="${sort === 'name' ? 'sort-active' : ''}" data-thsort="name">Loc</th><th class="${sort === 'content' ? 'sort-active' : ''}" data-thsort="content">Content</th><th class="${sort === 'dwell' ? 'sort-active' : ''}" data-thsort="dwell">Dwell</th></tr></thead><tbody>${rows}</tbody></table>${vistaHtml}`;
+        // ── STEM Chutes matching this load's route ──
+        let stemHtml = '';
+        if (CONFIG.data.stemEnabled && Object.keys(State.stemElementMap).length) {
+            const loadRoute = parseRoute(load.route).toUpperCase();
+            const stemMatches = [];
+            for (const [elKey, sd] of Object.entries(State.stemElementMap)) {
+                if (!sd.assigned) continue;
+                const dirs = sd.allDirections.map(d => d.toUpperCase());
+                if (dirs.some(d => d === loadRoute || d.includes(loadRoute) || loadRoute.includes(d))) {
+                    stemMatches.push({ elKey, ...sd });
+                }
+            }
+            if (stemMatches.length) {
+                const stemRows = stemMatches.map(s => {
+                    const matched = State.elements.some(el => (el.name || el.id) === s.elKey);
+                    return `<tr class="${matched ? 'dr-matched' : 'dr-unmatched'}" data-loc="${s.elKey}"><td><span class="dr-loc">${s.chuteLabel}</span></td><td style="color:#00bcd4;font-weight:600">🔀 ${s.direction}</td><td style="color:#78909C;font-size:9px">${s.userLogin || ''}</td></tr>`;
+                }).join('');
+                stemHtml = `<div class="other-cpt-section"><div class="other-cpt-header" id="stem-chutes-toggle"><span>🔀 STEM Chutes for <b>${load.route}</b></span><span class="other-cpt-count" style="background:#00bcd4">${stemMatches.length}</span></div><div class="other-cpt-body" id="stem-chutes-body" style="display:none"><table class="dtable"><thead><tr><th>Chute</th><th>Direction</th><th>User</th></tr></thead><tbody>${stemRows}</tbody></table></div></div>`;
+            }
+        }
+
+        document.getElementById('drawer-body').innerHTML = `<table class="dtable"><thead><tr><th class="${sort === 'name' ? 'sort-active' : ''}" data-thsort="name">Loc</th><th class="${sort === 'content' ? 'sort-active' : ''}" data-thsort="content">Content</th><th class="${sort === 'dwell' ? 'sort-active' : ''}" data-thsort="dwell">Dwell</th></tr></thead><tbody>${rows}</tbody></table>${vistaHtml}${stemHtml}`;
 
         document.getElementById('drawer-body').querySelectorAll('[data-thsort]').forEach(th => { th.addEventListener('click', () => { State.drawerSort = th.dataset.thsort; this._renderDrawerSort(); this._renderDrawer(load); }); });
 
         document.getElementById('drawer-body').querySelectorAll('tr[data-loc]').forEach(tr => { tr.addEventListener('click', () => { const el = State.elements.find(e2 => matchElement(e2, tr.dataset.loc)); if (el) { State.selectOnly(el); State.focusElement(el); R.render(); UI.refreshList(); UI.showInspector(State.primarySelected, !State.editMode); } }); });
 
         document.getElementById('other-cpt-toggle')?.addEventListener('click', () => { const body = document.getElementById('other-cpt-body'); if (body) body.style.display = body.style.display === 'none' ? 'block' : 'none'; });
+        document.getElementById('stem-chutes-toggle')?.addEventListener('click', () => { const body = document.getElementById('stem-chutes-body'); if (body) body.style.display = body.style.display === 'none' ? 'block' : 'none'; });
     },
 
 
@@ -5104,7 +5311,7 @@ ${vistaLocs.length ? `<h2>&#x1F4E6; Other CPTs for ${load.route} (Vista) <span c
     },
     _initDashboard() {
         document.getElementById('sb-toggle')?.addEventListener('click', () => { this._sbVisible = !this._sbVisible; this._applySbLayout(); setTimeout(() => R.resize(), 300); });
-        document.getElementById('dash-refresh')?.addEventListener('click', () => { SSP.fetchData(); if (YMS._token) YMS.fetchData(); VISTA.fetchData(); FMC.fetchData(); });
+        document.getElementById('dash-refresh')?.addEventListener('click', () => { SSP.fetchData(); if (YMS._token) YMS.fetchData(); VISTA.fetchData(); FMC.fetchData(); if(CONFIG.data.stemEnabled) STEM.fetchData(); });
         document.getElementById('dash-summary-fab')?.addEventListener('click', () => this.openSummary());
         document.getElementById('dash-zoom-fit')?.addEventListener('click', () => {
             if (!State.elements.length) return;
