@@ -1076,11 +1076,24 @@ const STEM = {
             }
             const merged = this._mergeData(reservations, resources);
             const newMap = {};
+            // Build reverse map: element name/id → stem data (via MatchIndex + direct name match)
             for (const [, chuteData] of merged) {
                 const matched = MatchIndex.getMatching(chuteData.chuteLabel);
                 for (const el of matched) {
                     const elKey = el.name || el.id;
                     newMap[elKey] = { ...chuteData };
+                }
+            }
+            // Fallback: direct match for elements not yet mapped (handles BG/BOX naming)
+            for (const el of State.elements) {
+                const elKey = el.name || el.id;
+                if (newMap[elKey]) continue;
+                const elUpper = elKey.toUpperCase();
+                for (const [mapKey, chuteData] of merged) {
+                    if (mapKey === elUpper || chuteData.chuteLabel.toUpperCase() === elUpper) {
+                        newMap[elKey] = { ...chuteData };
+                        break;
+                    }
                 }
             }
             State.stemElementMap = newMap;
@@ -2324,8 +2337,8 @@ _drawElements() {
                 }
             }
 
-            // ── STEM badge (chutes + BG + BOX, no highlight, no dim, no focus) ──
-            if (CONFIG.data.stemEnabled && (el.type === 'chute' || /\bBG\b|\bBOX\b/i.test(el.name || '')) && !isHL && !dimmed && !searchDimmed && !focusData && el.w >= 60 && el.h >= 28) {
+            // ── STEM badge (skip stacking locations, no highlight, no dim, no focus) ──
+            if (CONFIG.data.stemEnabled && !/STAGE|HOT.?PICK|GENERAL/i.test(el.name || '') && !isHL && !dimmed && !searchDimmed && !focusData && el.w >= 60 && el.h >= 28) {
                 const sd = State.stemElementMap?.[el.name || el.id];
                 if (sd) {
                     const hasVista = State.vistaElementMap?.[el.name || el.id]?.totalContainers > 0;
@@ -2428,8 +2441,8 @@ _drawElements() {
             }
         }
 // ← koniec if (vistaData && vistaData.totalContainers > 0)        }
-        // STEM sortation data (chutes + BG + BOX)
-        if (CONFIG.data.stemEnabled && (el.type === 'chute' || /\bBG\b|\bBOX\b/i.test(el.name || ''))) {
+        // STEM sortation data (skip stacking locations)
+        if (CONFIG.data.stemEnabled && !/STAGE|HOT.?PICK|GENERAL/i.test(el.name || '')) {
             const stemData = State.stemElementMap?.[el.name || el.id];
             if (stemData) {
                 lines.push({ text: '── STEM ──', color: '#5a6a7a', font: '9px "Amazon Ember",Arial,sans-serif' });
@@ -5763,7 +5776,7 @@ function bootMain() {
     R.init('cvs');
     R.render();
     UI.refreshList();
-    UI.setStatus(`✅ v3.4.0 | ${State.elements.length} el | ${State.editMode ? '🔓' : '🔒'}`);
+    UI.setStatus(`✅ v3.4.1 | ${State.elements.length} el | ${State.editMode ? '🔓' : '🔒'}`);
     try { Minimap.init(); } catch(e) { console.warn('[Minimap] init failed:', e); }
     try { GitSync.init(); } catch(e) { console.warn('[GitSync] init failed:', e); }
 try { unsafeWindow.__SM = { State, YMS, FMC, Dockmaster, RELAT, MapManager, MatchIndex, ymsGetVrIds }; } catch(e) {}
