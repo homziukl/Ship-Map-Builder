@@ -12413,7 +12413,7 @@
       "id": "Stage-069",
       "name": "FS_HOT_PICK_AREA7_E",
       "type": "stage",
-      "chute": "",
+      "chute": "https://vinyaas-ui-eu.amazon.com/mn/sortcenter/vinyaas",
       "maxContainers": 30,
       "x": 600,
       "y": 1780,
@@ -12553,6 +12553,6 @@
     "bgScale": 5.3
   },
   "bgUrl": "https://i.postimg.cc/434zMMNH/image-(9)(1).png",
-  "exportedAt": "2026-03-25T20:08:50.678Z",
+  "exportedAt": "2026-03-25T22:32:33.062Z",
   "version": "3.3.1"
 }
