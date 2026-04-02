@@ -631,7 +631,7 @@
     {
       "id": "EL-0070",
       "name": "F-B-061",
-      "chute": "KTW3-ShippingSorter1-S01669",
+      "chute": "F-B-061-BIS",
       "type": "chute",
       "x": 4020,
       "y": 1820,
@@ -12553,6 +12553,6 @@
     "bgScale": 5.3
   },
   "bgUrl": "https://i.postimg.cc/434zMMNH/image-(9)(1).png",
-  "exportedAt": "2026-04-02T20:17:59.592Z",
+  "exportedAt": "2026-04-02T21:58:20.391Z",
   "version": "3.3.1"
 }
