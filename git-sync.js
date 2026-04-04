@@ -1,5 +1,6 @@
-﻿// === GIT SYNC ===
-// GITSYNC â€” Auto-push map changes to GitHub
+// === GIT SYNC ===
+// ============================================================
+// GITSYNC — Auto-push map changes to GitHub
 // ============================================================
 const GitSync = {
     _owner: 'homziukl',
@@ -10,8 +11,8 @@ const GitSync = {
     _debounceMs: 10000,
     _pushing: false,
     _lastPushHash: '',
-    _lastKnownCount: 0,     // â† TU â€” safety check for catastrophic loss
-    _backupKey: 'gitsync_last_backup',  // â† i ten teÅ¼ jeÅ›li dodajesz daily backup
+    _lastKnownCount: 0,     // ← TU — safety check for catastrophic loss
+    _backupKey: 'gitsync_last_backup',  // ← i ten też jeśli dodajesz daily backup
     enabled: false,
 
     _getToken() { return GM_getValue('gitsync_pat', ''); },
@@ -31,7 +32,7 @@ const GitSync = {
         };
     },
 
-    // â”€â”€ Get current file SHA (needed for update) â”€â”€
+    // ── Get current file SHA (needed for update) ──
     async _getSha() {
         const path = this._filePath();
         const url = `${this._apiBase}/repos/${this._owner}/${this._repo}/contents/${path}?ref=${this._branch}`;
@@ -47,7 +48,7 @@ const GitSync = {
                             resolve(data.sha);
                         } catch { reject({ message: 'JSON parse error' }); }
                     } else if (r.status === 404) {
-                        resolve(null); // file doesn't exist yet â†’ create
+                        resolve(null); // file doesn't exist yet → create
                     } else {
                         reject({ message: `HTTP ${r.status}` });
                     }
@@ -57,29 +58,29 @@ const GitSync = {
         });
     },
 
-    // â”€â”€ Push file to GitHub â”€â”€
+    // ── Push file to GitHub ──
     async push(manual = false) {
         const token = this._getToken();
         if (!token) {
-            if (manual) UI.setStatus('âš ï¸ GitSync: no token â€” open Settings');
+            if (manual) UI.setStatus('⚠️ GitSync: no token — open Settings');
             return;
 
         }
         if (this._pushing) return;
-        // â”€â”€ Safety checks â”€â”€
+        // ── Safety checks ──
 const elCount = State.elements.length;
 
 // Never push empty map
 if (elCount === 0) {
-    if (manual) UI.setStatus('âš ï¸ GitSync: refusing to push empty map');
+    if (manual) UI.setStatus('⚠️ GitSync: refusing to push empty map');
     this._pushing = false;
     return;
 }
 
-// Catastrophic loss detection â€” if we had 50+ elements and now <10, block auto-push
+// Catastrophic loss detection — if we had 50+ elements and now <10, block auto-push
 if (!manual && this._lastKnownCount > 50 && elCount < this._lastKnownCount * 0.2) {
-    console.warn(`[ShipMap:GitSync] âš  Blocked auto-push: ${this._lastKnownCount} â†’ ${elCount} elements (>80% loss)`);
-    UI.setStatus(`âš ï¸ GitSync: blocked â€” ${this._lastKnownCount}â†’${elCount} elements. Manual push if intended.`);
+    console.warn(`[ShipMap:GitSync] ⚠ Blocked auto-push: ${this._lastKnownCount} → ${elCount} elements (>80% loss)`);
+    UI.setStatus(`⚠️ GitSync: blocked — ${this._lastKnownCount}→${elCount} elements. Manual push if intended.`);
     this._pushing = false;
     return;
 }
@@ -98,7 +99,7 @@ this._lastKnownCount = elCount;
                 return;
             }
 
-            UI.setStatus('â˜ï¸ GitSync: pushing...');
+            UI.setStatus('☁️ GitSync: pushing...');
 
             const sha = await this._getSha();
             const path = this._filePath();
@@ -106,7 +107,7 @@ this._lastKnownCount = elCount;
 
             const now = new Date();
             const timeStr = `${now.getHours().toString().padStart(2,'0')}:${now.getMinutes().toString().padStart(2,'0')}`;
-            const message = `ðŸš¢ ${CONFIG.warehouseId} â€” ${State.elements.length} elements â€” ${timeStr}`;
+            const message = `🚢 ${CONFIG.warehouseId} — ${State.elements.length} elements — ${timeStr}`;
 
             const body = {
                 message,
@@ -125,11 +126,11 @@ this._lastKnownCount = elCount;
                             try { resolve(JSON.parse(r.responseText)); }
                             catch { resolve({}); }
                         } else if (r.status === 409) {
-                            reject({ message: 'Conflict â€” someone else pushed. Refresh & retry.' });
+                            reject({ message: 'Conflict — someone else pushed. Refresh & retry.' });
                         } else if (r.status === 401 || r.status === 403) {
-                            reject({ message: 'Auth failed â€” check token permissions' });
+                            reject({ message: 'Auth failed — check token permissions' });
                         } else if (r.status === 422) {
-                            reject({ message: 'SHA mismatch â€” file changed. Retry...' });
+                            reject({ message: 'SHA mismatch — file changed. Retry...' });
                         } else {
                             reject({ message: `HTTP ${r.status}` });
                         }
@@ -139,13 +140,13 @@ this._lastKnownCount = elCount;
             });
 
             this._lastPushHash = hash;
-            const shortSha = result.content?.sha?.substring(0, 7) || 'âœ“';
-            UI.setStatus(`â˜ï¸ Synced â†’ ${shortSha} Â· ${State.elements.length} el`);
-            console.log(`[ShipMap:GitSync] âœ… Pushed ${path} (${shortSha})`);
+            const shortSha = result.content?.sha?.substring(0, 7) || '✓';
+            UI.setStatus(`☁️ Synced → ${shortSha} · ${State.elements.length} el`);
+            console.log(`[ShipMap:GitSync] ✅ Pushed ${path} (${shortSha})`);
 
         } catch (err) {
-            console.error(`[ShipMap:GitSync] âŒ ${err.message}`);
-            UI.setStatus(`âŒ GitSync: ${err.message}`);
+            console.error(`[ShipMap:GitSync] ❌ ${err.message}`);
+            UI.setStatus(`❌ GitSync: ${err.message}`);
 
             // Auto-retry on SHA mismatch (once)
             if (err.message?.includes('SHA mismatch') && !manual) {
@@ -158,19 +159,19 @@ this._lastKnownCount = elCount;
         this._pushing = false;
     },
 
-    // â”€â”€ Schedule push (debounced) â”€â”€
+    // ── Schedule push (debounced) ──
     schedulePush() {
         if (!this.enabled) return;
         clearTimeout(this._debounceTimer);
         this._debounceTimer = setTimeout(() => this.push(false), this._debounceMs);
     },
 
-    // â”€â”€ Pull latest from GitHub â”€â”€
+    // ── Pull latest from GitHub ──
     async pull() {
         const token = this._getToken();
-        if (!token) { UI.setStatus('âš ï¸ GitSync: no token'); return false; }
+        if (!token) { UI.setStatus('⚠️ GitSync: no token'); return false; }
 
-        UI.setStatus('â˜ï¸ GitSync: pulling...');
+        UI.setStatus('☁️ GitSync: pulling...');
 
         try {
             const path = this._filePath();
@@ -197,18 +198,18 @@ this._lastKnownCount = elCount;
             const content = decodeURIComponent(escape(atob(data.content.replace(/\n/g, ''))));
             const ok = State.importJSON(content);
             if (ok) {
-                UI.setStatus(`â˜ï¸ Pulled: ${State.elements.length} elements`);
+                UI.setStatus(`☁️ Pulled: ${State.elements.length} elements`);
                 UI._initLegend();
                 UI._initType();
                 UI.refreshList();
                 R.render();
                 return true;
             }
-            UI.setStatus('âŒ GitSync: invalid map data');
+            UI.setStatus('❌ GitSync: invalid map data');
             return false;
 
         } catch (err) {
-            UI.setStatus(`âŒ GitSync: ${err.message}`);
+            UI.setStatus(`❌ GitSync: ${err.message}`);
             return false;
         }
     },
