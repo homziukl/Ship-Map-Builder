@@ -129,15 +129,31 @@ function parseRoute(raw, { stripPrefix = true, stripSuffix = true } = {}) {
 // ============================================================
 function isSwapBody(eq) { return eq ? eq.toUpperCase().replace(/[^A-Z0-9]/g, '').includes('SWAP') : false; }
 function isOneSwapBody(eq) { if (!eq) return false; const u = eq.toUpperCase().replace(/[^A-Z0-9]/g, ''); return u.includes('ONESWAP') || u.includes('1SWAP') || u === 'ONESWAPBODY'; }
-function equipTypeShort(eq) {
+function equipTypeShort(eq, vrId, subCarrier) {
     if (!eq) return '';
+    // FMC cross-reference for precise equipment classification
+    if (vrId && typeof FMC !== 'undefined' && FMC._vrIdClassMap?.size) {
+        const fmcData = FMC._vrIdClassMap.get(vrId.toUpperCase());
+        if (fmcData?.tour) {
+            const fEq = (fmcData.tour.equipmentType || '').toUpperCase();
+            const fSub = (fmcData.tour.subcarrier || '').toUpperCase();
+            if (fEq.includes('DROP')) return fSub.includes('ATS') ? 'ATS' : 'DROP';
+        }
+    }
+    // Check subCarrier from SSP/caller for ATS classification
+    if (subCarrier) {
+        const sc = subCarrier.toUpperCase();
+        if (sc.includes('ATS')) return 'ATS';
+    }
     const u = eq.toUpperCase().replace(/[^A-Z0-9_ ]/g, '');
-    if (isOneSwapBody(eq)) return '1SW'; if (u.includes('SWAP')) return 'SW';
+    if (isOneSwapBody(eq)) return '1SW'; if (u.includes('SWAP')) return '2SW';
     if (u.includes('SEVEN_HALF') || u.includes('SEVENHALFTONTRUCK')) return '7.5t';
     if (u.includes('SPRINTER')) return 'SPR'; if (u.includes('BOX_TRUCK') || u.includes('BOXTRUCK')) return 'BOX';
     if (u.includes('THREE_WHEELER') || u.includes('THREEWHEELER')) return '3WH';
     if (u.includes('REFRIGER')) return 'REF'; if (u.includes('SKIRTED')) return 'SKR';
-    if (u.includes('SOFT')) return 'SFT'; if (u.includes('TRAILER')) return 'TRL';
+    if (u.includes('SOFT')) return 'SFT';
+    if (u.includes('DROP')) return 'DROP';
+    if (u.includes('TRAILER')) return 'DET';
     return eq.substring(0, 3).toUpperCase();
 }
 function equipTypeColor(eq) {
@@ -579,11 +595,11 @@ const SSP = {
     async fetchData() {
         State.dataLoading = true; UI.updateDataPanel();
         try {
-            const now = Date.now(), startDate = now - 24 * 3600000, endDate = now + 3 * 24 * 3600000;
+            const now = Date.now(), startDate = now - 24 * 3600000, endDate = now + 7 * 24 * 3600000;
             const url = `${CONFIG.baseUrl}/ssp/dock/hrz/ob/fetchdata?entity=getOutboundDockView&nodeId=${CONFIG.warehouseId}&startDate=${startDate}&endDate=${endDate}&loadCategories=outboundScheduled,outboundInProgress,outboundReadyToDepart&shippingPurposeType=TRANSSHIPMENT,NON-TRANSSHIPMENT,SHIP_WITH_AMAZON`;
             const data = await this._fetchJSON(url);
             const aaData = data?.ret?.aaData || [], allRows = [];
-            for (const item of aaData) { const ld = item.load; if (!ld || !ld.route) continue; allRows.push({ route:this._parseRoute(ld.route), rawRoute:ld.route, vrId:ld.vrId, status:ld.status, statusLabel:this._statusLabel(ld.status), statusShort:this._statusShort(ld.status), statusColor:this._statusColor(ld.status), carrier:ld.carrier, cpt:ld.criticalPullTime||'—', sdt:ld.scheduledDepartureTime||'—', dockDoor:item.resource?.[0]?.label||'—', trailer:item.trailer?.trailerNumber||'—', equipmentType:ld.equipmentType||'', loadGroupId:ld.loadGroupId, planId:ld.planId, trailerId:item.trailer?.trailerId||'', trailerNumber:item.trailer?.trailerNumber||'', facilityStatus:this._facilityStatus(ld.status), _expanded:false, _containers:null, _containersLoading:false }); }
+            for (const item of aaData) { const ld = item.load; if (!ld || !ld.route) continue; allRows.push({ route:this._parseRoute(ld.route), rawRoute:ld.route, vrId:ld.vrId, status:ld.status, statusLabel:this._statusLabel(ld.status), statusShort:this._statusShort(ld.status), statusColor:this._statusColor(ld.status), carrier:ld.carrier, subCarrier:ld.subCarrier||'', cpt:ld.criticalPullTime||'—', sdt:ld.scheduledDepartureTime||'—', dockDoor:item.resource?.[0]?.label||'—', trailer:item.trailer?.trailerNumber||'—', equipmentType:ld.equipmentType||'', loadGroupId:ld.loadGroupId, planId:ld.planId, trailerId:item.trailer?.trailerId||'', trailerNumber:item.trailer?.trailerNumber||'', facilityStatus:this._facilityStatus(ld.status), _expanded:false, _containers:null, _containersLoading:false }); }
             const vrIdCount = new Map(); for (const row of allRows) { if (!row.vrId) continue; vrIdCount.set(row.vrId, (vrIdCount.get(row.vrId)||0)+1); }
             const seen = new Set(), preLoads = []; let swapFiltered = 0;
             for (const row of allRows) { if (seen.has(row.planId)) continue; seen.add(row.planId); if (SiteSettings.filterSwapBefore && isSwapBody(row.equipmentType) && !isOneSwapBody(row.equipmentType)) { if ((vrIdCount.get(row.vrId)||0) < 2) { swapFiltered++; continue; } } preLoads.push(row); }
@@ -1817,7 +1833,7 @@ _buildCompletedSet(rawList) {
 // ============================================================
 // MAP MANAGER — source: views/map-manager.js
 // ============================================================
-// === MAP MANAGER ===
+﻿// === MAP MANAGER ===
 // MAP MANAGER — GitHub maps + local snapshots
 // ============================================================
 const MapManager = {
@@ -2395,7 +2411,7 @@ _drawElements() {
         if (type) lines.push({ text:type.label, color:type.color, font:'11px "Amazon Ember",Arial,sans-serif' });
         if (hl) {
             if (hl.ymsMatch && !hl.totalPkgs && !hl.loosePkgs && Object.keys(hl.containers).length === 0) { lines.push({ text:'── YMS MATCH ──', color:'#ff9900', font:'9px "Amazon Ember",Arial,sans-serif' }); lines.push({ text:`🚛 VR ID on ${hl.ymsLocCode || 'yard'}`, color:'#4fc3f7', font:'bold 11px "Amazon Ember",Arial,sans-serif' }); if (hl.ymsSource === 'annotation') lines.push({ text:'📝 found in annotation', color:'#ffd600', font:'10px "Amazon Ember",Arial,sans-serif' }); }
-            else { lines.push({ text:'── SSP ──', color:'#ff9900', font:'9px "Amazon Ember",Arial,sans-serif' }); if (hl.ymsMatch) lines.push({ text:`🚛 VR on ${hl.ymsLocCode||'yard'}${hl.ymsSource==='annotation'?' 📝':''}`, color:'#4fc3f7', font:'10px "Amazon Ember",Arial,sans-serif' }); if (hl.onlyLoose) lines.push({ text:`📬 ${hl.loosePkgs} dwelling`, color:'#90a4ae', font:'bold 11px "Amazon Ember",Arial,sans-serif' }); else { const TS = {'PALLET':'🛒Pal','GAYLORD':'📫Gay','BAG':'👜Bag','CART':'🛒Cart'}; const cp = Object.entries(hl.containers).map(([t2,n])=>`${TS[t2]||t2}:${n}`); if (cp.length) lines.push({ text:cp.join(' '), color:'#ffd600', font:'bold 11px "Amazon Ember",Arial,sans-serif' }); } lines.push({ text:`Σ ${hl.totalPkgs}pkg · ${hl.totalWeight}kg`, color:hl.onlyLoose?'#90a4ae':'#ff9900', font:'bold 11px "Amazon Ember",Arial,sans-serif' }); }
+            else { lines.push({ text:'── SSP ──', color:'#ff9900', font:'9px "Amazon Ember",Arial,sans-serif' }); if (hl.ymsMatch) lines.push({ text:`🚛 VR on ${hl.ymsLocCode||'yard'}${hl.ymsSource==='annotation'?' 📝':''}`, color:'#4fc3f7', font:'10px "Amazon Ember",Arial,sans-serif' }); if (hl.onlyLoose) lines.push({ text:`📬 ${hl.loosePkgs} dwelling`, color:'#90a4ae', font:'bold 11px "Amazon Ember",Arial,sans-serif' }); else { const TS = {'PALLET':'🛒Pal','GAYLORD':'📫Gay','BAG':'👜Bag','CART':'🛒Cart'}; const cp = Object.entries(hl.containers).map(([t2,n])=>`${TS[t2]||t2}:${n}`); if (cp.length) lines.push({ text:cp.join(' '), color:'#ffd600', font:'bold 11px "Amazon Ember",Arial,sans-serif' }); } lines.push({ text:`Î£ ${hl.totalPkgs}pkg · ${hl.totalWeight}kg`, color:hl.onlyLoose?'#90a4ae':'#ff9900', font:'bold 11px "Amazon Ember",Arial,sans-serif' }); }
         }
         const vistaData = State.vistaElementMap?.[el.name || el.id];
         if (vistaData && vistaData.totalContainers > 0) {
@@ -2432,7 +2448,7 @@ _drawElements() {
                 const routeEntries = Object.entries(vistaData.routes).sort((a, b) => b[1].count - a[1].count);
                 for (const [r2, d2] of routeEntries) {
                     const rShort = parseRoute(r2);
-                    lines.push({ text:`→ ${rShort} ×${d2.count} (${d2.pkgs}pkg)`, color:'#546E7A', font:'9px "Amazon Ember",Arial,sans-serif' });
+                    lines.push({ text:`→ ${rShort} ×—${d2.count} (${d2.pkgs}pkg)`, color:'#546E7A', font:'9px "Amazon Ember",Arial,sans-serif' });
                 }
             }
         }
@@ -2804,6 +2820,12 @@ select.tsel{background:#37475a;color:#e0e0e0;border:1px solid #4a5a6a;padding:4p
 .dtable{width:100%;border-collapse:collapse}.dtable th{text-align:left;font-size:9px;color:#5a6a7a;text-transform:uppercase;letter-spacing:.5px;padding:4px 8px;border-bottom:1px solid #2a3a4a;background:#0d1b2a;position:sticky;top:0;z-index:1;cursor:pointer;user-select:none;white-space:nowrap}.dtable th:hover{color:#ff9900}.dtable th.sort-active{color:#ff9900}.dtable td{padding:3px 8px;border-bottom:1px solid rgba(255,255,255,.03);font-size:11px;vertical-align:middle}.dtable tr:hover{background:rgba(255,255,255,.03)}.dtable tr.dr-matched{border-left:3px solid #ff9900}.dtable tr.dr-unmatched{opacity:.45}.dtable tr.dr-dwell{border-left:3px solid #78909C}.dtable tr[data-loc]{cursor:pointer}.dtable tr[data-loc]:hover{background:rgba(255,153,0,.1)!important}
 .dr-loc{font-family:'Amazon Ember',monospace;font-weight:bold;color:#e0e0e0;white-space:nowrap;font-size:10px}.dr-content{color:#b0bec5;display:flex;align-items:center;gap:3px;flex-wrap:nowrap;white-space:nowrap}.dr-badge{display:inline-block;padding:0px 4px;border-radius:3px;font-size:9px;font-weight:bold;white-space:nowrap}.dr-pal{background:rgba(255,214,0,.15);color:#ffd600}.dr-cart{background:rgba(0,200,83,.15);color:#69f0ae}.dr-gaylord{background:rgba(224,64,251,.15);color:#e040fb}.dr-bag{background:rgba(79,195,247,.15);color:#4fc3f7}.dr-pkg{background:rgba(120,144,156,.2);color:#90a4ae}.dr-other{background:rgba(158,158,158,.15);color:#bdbdbd}.dr-empty{background:rgba(255,82,82,.2);color:#ff5252}
 .dr-sf-row{display:flex;flex-wrap:wrap;gap:2px;margin-top:1px}.dr-sf-badge{display:inline-block;padding:0 3px;border-radius:2px;font-size:8px;font-weight:bold;font-family:'Amazon Ember',monospace;background:rgba(41,98,255,.15);color:#82b1ff;white-space:nowrap}
+.vr-runs-row{display:flex;gap:3px;flex-wrap:wrap;margin:2px 8px;align-items:center}
+.vr-run-badge{position:relative;display:inline-flex;align-items:center;gap:2px;padding:1px 5px;border-radius:3px;font-size:8px;font-weight:bold;font-family:'Amazon Ember',monospace;cursor:default;white-space:nowrap;border:1px solid rgba(255,255,255,.1)}
+.vr-run-badge .vr-eq{font-size:7px;opacity:.8}
+.vr-run-badge .vr-sdt{font-size:8px;font-weight:bold}
+.vr-run-tip{display:none;position:fixed;background:#1a2a3a;border:1px solid #3a4a5a;border-radius:4px;padding:5px 8px;font-size:9px;color:#e0e0e0;white-space:nowrap;z-index:9999;pointer-events:none;box-shadow:0 4px 12px rgba(0,0,0,.6)}
+.vr-runs-label{font-size:8px;color:#5a6a7a;margin-right:2px}
 .dr-dwell-cell{font-size:10px;color:#ffb74d;white-space:nowrap;font-weight:bold;font-family:monospace}.dr-dwell-cell.long{color:#ff5252}
 .yms-report{padding:0}.yms-rtable{width:100%;border-collapse:collapse}.yms-rtable th{text-align:left;font-size:9px;color:#5a6a7a;text-transform:uppercase;padding:5px 10px;border-bottom:1px solid #2a3a4a;background:#0d1b2a;position:sticky;top:0;z-index:1}.yms-rtable td{padding:4px 10px;border-bottom:1px solid rgba(255,255,255,.03);font-size:11px}.yms-rtable tr:hover{background:rgba(255,255,255,.03)}.yms-rtable .owner-code{font-weight:bold;font-family:'Amazon Ember',monospace;color:#e0e0e0}.yms-rtable .cnt{text-align:center;font-weight:bold;font-family:monospace}.yms-rtable .cnt-warn{color:#ff5252}.yms-rtable .cnt-ok{color:#69f0ae}.yms-rtable .priority-row{background:rgba(255,153,0,.05)}.yms-rtable .total-row{background:rgba(255,153,0,.1);font-weight:bold}.yms-rtable .total-row td{border-top:2px solid #ff9900;color:#ff9900}
 .summary-overlay{position:fixed;inset:0;z-index:10000;display:flex;align-items:center;justify-content:center;background:rgba(0,0,0,0.7);backdrop-filter:blur(4px)}.summary-panel{background:#111827;border:2px solid #ff9900;border-radius:12px;width:90vw;max-width:900px;max-height:90vh;display:flex;flex-direction:column;overflow:hidden;box-shadow:0 20px 60px rgba(0,0,0,0.8)}.summary-hdr{padding:12px 20px;display:flex;justify-content:space-between;align-items:center;background:#1a2236;border-bottom:2px solid #ff9900}.summary-hdr h2{font-size:16px;color:#ff9900;margin:0;display:flex;align-items:center;gap:8px}.summary-hdr .shift-badge{background:#ff9900;color:#000;padding:2px 10px;border-radius:10px;font-size:13px;font-weight:bold}.summary-hdr .time-badge{color:#8899aa;font-size:12px;font-family:monospace}.summary-close{background:none;border:none;color:#5a6a7a;font-size:20px;cursor:pointer;padding:4px 8px;border-radius:4px}.summary-close:hover{background:rgba(255,255,255,.1);color:#fff}.summary-body{flex:1;overflow-y:auto;padding:16px 20px}.summary-grid{display:grid;grid-template-columns:1fr 1fr;gap:16px}.summary-card{background:#1a2236;border:1px solid #2a3a4a;border-radius:8px;padding:12px 16px;display:flex;flex-direction:column;gap:8px}.summary-card h3{font-size:11px;color:#ff9900;text-transform:uppercase;letter-spacing:.5px;margin:0}.summary-kpi{display:flex;gap:12px;flex-wrap:wrap}.summary-kpi-item{display:flex;flex-direction:column;align-items:center;min-width:60px}.summary-kpi-val{font-size:24px;font-weight:bold;font-family:'Amazon Ember',monospace;line-height:1.1}.summary-kpi-label{font-size:9px;color:#5a6a7a;text-transform:uppercase}.summary-bar{height:6px;border-radius:3px;background:#2a3a4a;overflow:hidden;width:100%}.summary-bar-fill{height:100%;border-radius:3px}.summary-table{width:100%;border-collapse:collapse;font-size:11px}.summary-table th{text-align:left;font-size:9px;color:#5a6a7a;text-transform:uppercase;padding:4px 8px;border-bottom:1px solid #2a3a4a}.summary-table td{padding:4px 8px;border-bottom:1px solid rgba(255,255,255,.03)}.summary-table .val{font-family:monospace;font-weight:bold;text-align:center}.summary-footer{padding:8px 20px;border-top:1px solid #2a3a4a;display:flex;justify-content:space-between;align-items:center;background:#0d1b2a}
@@ -3176,7 +3198,7 @@ select.tsel{background:#37475a;color:#e0e0e0;border:1px solid #4a5a6a;padding:4p
         if (CONFIG.data.stemEnabled) setTimeout(() => STEM.startAutoRefresh(), 5000);
         Lifecycle.register('ui-panel-refresh', () => { if (State.sspLoads.length) this.updateDataPanel(); }, CONFIG.data.uiRefreshInterval);
         Trend.start();
-    },  // ← ZAMKNIĘCIE _initDataPanel — PRZECINEK
+    },  // ← ZAMKNIÄ˜CIE _initDataPanel — PRZECINEK
 
     // ═══════════════════════════════════════════════════
     //  DM APPOINTMENT RENDERER
@@ -3186,7 +3208,7 @@ select.tsel{background:#37475a;color:#e0e0e0;border:1px solid #4a5a6a;padding:4p
         var dwMin = yo.arrivalEpoch ? Math.round((Date.now() / 1000 - yo.arrivalEpoch) / 60) : 0;
         var dwColor = dwMin > 1440 ? '#ff1744' : (dwMin > 480 ? '#ff5252' : (dwMin > 120 ? '#ff9100' : '#ffd600'));
 
-        var eqShort = equipTypeShort(yo.equipType);
+        var eqShort = equipTypeShort(yo.equipType, yo.vrId);
         var eqColor = equipTypeColor(yo.equipType);
 
         var statusColor = yo.status === 'FULL' ? '#ffd600' : (yo.status === 'IN_PROGRESS' ? '#69f0ae' : '#4fc3f7');
@@ -3313,6 +3335,73 @@ select.tsel{background:#37475a;color:#e0e0e0;border:1px solid #4a5a6a;padding:4p
 
 
     // ═══════════════════════════════════════════════════
+    //  UPCOMING RUNS PER ROUTE (SSP → Vista)
+    // ═══════════════════════════════════════════════════
+    _getUpcomingRuns(vistaRouteKey) {
+        if (!State.sspLoads.length) return [];
+        var vk = vistaRouteKey.toUpperCase();
+        var now = Date.now();
+        var matched = [];
+        for (var i = 0; i < State.sspLoads.length; i++) {
+            var ld = State.sspLoads[i];
+            if (ld.status === 'DEPARTED' || ld.status === 'CANCELLED') continue;
+            // Match: routeGroupKey of SSP load matches Vista route key
+            var ldRoutes = ld.route.split(/\s*\+\s*/);
+            var hit = false;
+            for (var ri = 0; ri < ldRoutes.length; ri++) {
+                if (routeGroupKey(ldRoutes[ri]) === vk) { hit = true; break; }
+            }
+            if (!hit) continue;
+            // Parse SDT for sorting
+            var sdtMs = 0;
+            if (ld.sdt && ld.sdt !== '—') { try { sdtMs = new Date(ld.sdt).getTime(); } catch(e) {} }
+            matched.push({ load: ld, sdtMs: sdtMs });
+        }
+        // Sort by SDT ascending (closest first), no-SDT at end
+        matched.sort(function(a, b) {
+            if (!a.sdtMs && !b.sdtMs) return 0;
+            if (!a.sdtMs) return 1;
+            if (!b.sdtMs) return -1;
+            return a.sdtMs - b.sdtMs;
+        });
+        // Return max 5 closest runs
+        return matched.slice(0, 5);
+    },
+
+    _renderRunBadges(vistaRouteKey) {
+        var runs = this._getUpcomingRuns(vistaRouteKey);
+        if (!runs.length) return '';
+        var html = '<div class="vr-runs-row"><span class="vr-runs-label">🚛</span>';
+        for (var i = 0; i < runs.length; i++) {
+            var ld = runs[i].load;
+            var sdtMs = runs[i].sdtMs;
+            var bgColor = SSP._statusColor(ld.status);
+            var eq = equipTypeShort(ld.equipmentType, ld.vrId, ld.subCarrier);
+            var sdtShort = '—';
+            var sdtFull = 'No SDT';
+            if (sdtMs) {
+                var d = new Date(sdtMs);
+                sdtShort = d.getHours().toString().padStart(2,'0') + ':' + d.getMinutes().toString().padStart(2,'0');
+                sdtFull = d.getDate().toString().padStart(2,'0') + '/' + (d.getMonth()+1).toString().padStart(2,'0') + ' ' + sdtShort;
+            }
+            var statusTxt = SSP._statusLabel(ld.status);
+            var door = ld.dockDoor !== '—' ? ld.dockDoor : '';
+            var tipLines = '<b>' + (ld.vrId || '—') + '</b> · ' + statusTxt
+                + '<br>SDT: <b>' + sdtFull + '</b>'
+                + (eq ? '<br>Equip: ' + eq : '')
+                + (door ? '<br>Door: ' + door : '')
+                + (ld.carrier ? '<br>Carrier: ' + ld.carrier : '');
+            html += '<span class="vr-run-badge" style="background:' + bgColor + '22;color:' + bgColor + '">'
+                + '<span class="vr-sdt">' + sdtShort + '</span>'
+                + (eq ? '<span class="vr-eq">' + eq + '</span>' : '')
+                + '<span class="vr-run-tip">' + tipLines + '</span>'
+                + '</span>';
+        }
+        html += '</div>';
+        return html;
+    },
+
+    // ═══════════════════════════════════════════════════
     //  DATA PANEL DISPATCHER
     // ═══════════════════════════════════════════════════
     _isUpdating: false,
@@ -3367,6 +3456,7 @@ select.tsel{background:#37475a;color:#e0e0e0;border:1px solid #4a5a6a;padding:4p
                 + (g.maxDwell > 0 ? '<span style="font-size:9px;font-family:monospace;color:' + dwC + '">' + g.maxDwell + 'm</span>' : '')
                 + '</div>'
                 + '<div style="display:flex;gap:2px;flex-wrap:wrap;margin:2px 8px;font-size:9px">' + types + '</div>'
+                + this._renderRunBadges(g.key)
                 + '<div style="height:4px;border-radius:2px;background:#2a3a4a;margin:3px 8px;overflow:hidden"><div style="height:100%;width:' + barPct + '%;background:' + congC + ';border-radius:2px"></div></div>'
                 + '<div class="fmc-tour-detail">' + locsHtml + '</div>'
                 + '</div>';
@@ -3396,6 +3486,30 @@ select.tsel{background:#37475a;color:#e0e0e0;border:1px solid #4a5a6a;padding:4p
                 e.stopPropagation();
                 var mapEl = State.elements.find(function(e2) { return matchElement(e2, el.dataset.vloc); });
                 if (mapEl) { State.selectOnly(mapEl); State.focusElement(mapEl); R.render(); UI.refreshList(); UI.showInspector(State.primarySelected, !State.editMode); }
+            });
+        });
+
+        // Tooltip positioning for run badges (fixed position to escape overflow)
+        list.querySelectorAll('.vr-run-badge').forEach(function(badge) {
+            var tip = badge.querySelector('.vr-run-tip');
+            if (!tip) return;
+            badge.addEventListener('mouseenter', function() {
+                var r = badge.getBoundingClientRect();
+                tip.style.display = 'block';
+                // Position above the badge, centered
+                var tipRect = tip.getBoundingClientRect();
+                var left = r.left + r.width / 2 - tipRect.width / 2;
+                var top = r.top - tipRect.height - 6;
+                // If clipped at top, show below instead
+                if (top < 4) top = r.bottom + 6;
+                // Keep within viewport horizontally
+                if (left < 4) left = 4;
+                if (left + tipRect.width > window.innerWidth - 4) left = window.innerWidth - tipRect.width - 4;
+                tip.style.left = left + 'px';
+                tip.style.top = top + 'px';
+            });
+            badge.addEventListener('mouseleave', function() {
+                tip.style.display = 'none';
             });
         });
     },
@@ -3477,7 +3591,7 @@ select.tsel{background:#37475a;color:#e0e0e0;border:1px solid #4a5a6a;padding:4p
         const isCptLoad = isCptEqualsSdt(l);
         const cpt = (l.status !== 'DEPARTED' && l.status !== 'CANCELLED') ? cptCountdown(l.cpt) : null;
         const cptBadge = cpt ? `<span class="cpt-countdown cpt-${cpt.level}">⏰${cpt.text}</span>` : '';
-        const eqBadge = l.equipmentType ? `<span class="load-equip-badge" style="background:${equipTypeColor(l.equipmentType)}20;color:${equipTypeColor(l.equipmentType)}">${equipTypeShort(l.equipmentType)}</span>` : '';
+        const eqBadge = l.equipmentType ? `<span class="load-equip-badge" style="background:${equipTypeColor(l.equipmentType)}20;color:${equipTypeColor(l.equipmentType)}">${equipTypeShort(l.equipmentType, l.vrId, l.subCarrier)}</span>` : '';
         const vrId2 = l.vrId?.toUpperCase() || '';
         const yiAll = vrId2 ? State.findYmsForVrId(vrId2) : null;
         let yb = '';
@@ -3827,7 +3941,7 @@ ${eyeBtn}
         const delayBadge = maxDelay > 15 ? `<span class="fmc-tour-delay">⚠+${maxDelay}m</span>` : '';
         const isAtYard = tour.hasArrived && !tour.hasDeparted;
         const dwellBadge = isAtYard && tour.yardDwellMin > 0 ? `<span class="fmc-tour-dwell" style="color:${tour.yardDwellMin > 120 ? '#ff5252' : tour.yardDwellMin > 60 ? '#ff9100' : '#69f0ae'}">⏱${tour.yardDwellMin}m</span>` : '';
-        const eqBadge = tour.equipmentType ? `<span class="load-equip-badge" style="background:${equipTypeColor(tour.equipmentType)}20;color:${equipTypeColor(tour.equipmentType)}">${equipTypeShort(tour.equipmentType)}</span>` : '';
+        const eqBadge = tour.equipmentType ? `<span class="load-equip-badge" style="background:${equipTypeColor(tour.equipmentType)}20;color:${equipTypeColor(tour.equipmentType)}">${equipTypeShort(tour.equipmentType, tour.vrId, tour.subcarrier)}</span>` : '';
         const vrId = tour.vrId?.toUpperCase() || '';
         const ymsHits = vrId ? State.findYmsForVrId(vrId) : null;
         const ymsBadge = ymsHits ? `<span class="load-yms-badge load-yms-found">✅</span>` : '';
@@ -3953,7 +4067,7 @@ ${eyeBtn}
             + (load.vrId ? `<span style="font-size:11px;font-family:monospace;color:#4fc3f7;cursor:pointer" title="Click to copy" id="drawer-vrid">${load.vrId}</span>` : '')
             + `<span class="load-status" style="background:${load.statusColor};color:#000">${load.statusLabel}</span>`
             + (load.dockDoor !== '—' ? `<span style="color:#e040fb;font-weight:bold">${load.dockDoor}</span>` : '')
-            + `<span class="load-equip-badge" style="background:${equipTypeColor(load.equipmentType)}20;color:${equipTypeColor(load.equipmentType)}">${load._swapCount > 1 ? `${load._swapCount}× ` : ''}${equipTypeShort(load.equipmentType)}</span>`
+            + `<span class="load-equip-badge" style="background:${equipTypeColor(load.equipmentType)}20;color:${equipTypeColor(load.equipmentType)}">${load._swapCount > 1 ? `${load._swapCount}× ` : ''}${equipTypeShort(load.equipmentType, load.vrId, load.subCarrier)}</span>`
             + drawerCptBadge
             + yb;
 
@@ -4460,7 +4574,7 @@ openTrend() {
 
         const departedByEquip = {};
         for (const l of shiftLoads) {
-            const eq = equipTypeShort(l.equipmentType) || 'OTHER';
+            const eq = equipTypeShort(l.equipmentType, l.vrId, l.subCarrier) || 'OTHER';
             departedByEquip[eq] = (departedByEquip[eq] || 0) + 1;
         }
 
@@ -4483,7 +4597,7 @@ openTrend() {
                 const vistaTypes = vistaLoc ? { ...vistaLoc.types } : {};
                 const vistaPkgs = vistaLoc ? vistaLoc.totalPkgs : 0;
                 const vistaTotal = vistaLoc ? vistaLoc.totalContainers : 0;
-                const entry = { location: loc.code, type: equipTypeShort(asset.type), eqColor: equipTypeColor(asset.type), owner: asset.owner?.code || asset.broker?.code || '—', vrId, status: asset.status, route, sspStatus, vistaTypes, vistaPkgs, vistaTotal, isField };
+                const entry = { location: loc.code, type: equipTypeShort(asset.type, vrId), eqColor: equipTypeColor(asset.type), owner: asset.owner?.code || asset.broker?.code || '—', vrId, status: asset.status, route, sspStatus, vistaTypes, vistaPkgs, vistaTotal, isField };
                 ymsTrailers.push(entry);
                 if (isField && (asset.status === 'FULL' || asset.status === 'IN_PROGRESS' || vistaTotal > 0)) { fieldTrailers.push(entry); }
             }
@@ -4507,7 +4621,7 @@ openTrend() {
             const overdueMins = Math.floor((Date.now() - sdtDate.getTime()) / 60000);
             let pkgCount = 0, containerCount = 0;
             if (l._containers) { pkgCount = l._containers.stats.packageCount || 0; containerCount = l._containers.stats.locationCount || 0; }
-            sspMisses.push({ route: l.route, rawRoute: l.rawRoute, vrId: l.vrId || '—', status: l.statusShort, statusColor: l.statusColor, sdt: l.sdt, dockDoor: l.dockDoor, equipType: equipTypeShort(l.equipmentType), overdueMins, pkgCount, containerCount });
+            sspMisses.push({ route: l.route, rawRoute: l.rawRoute, vrId: l.vrId || '—', status: l.statusShort, statusColor: l.statusColor, sdt: l.sdt, dockDoor: l.dockDoor, equipType: equipTypeShort(l.equipmentType, l.vrId, l.subCarrier), overdueMins, pkgCount, containerCount });
         }
         sspMisses.sort((a, b) => b.overdueMins - a.overdueMins);
 
@@ -4812,7 +4926,7 @@ ${ymsTrailers.length ? `<div class="handover-section">
         for (var yi = 0; yi < ymsRows.length; yi++) {
             var r = ymsRows[yi];
             var sc = stColor[r.status] || '#5a6a7a';
-            var eqShort = r.eqType ? equipTypeShort(r.eqType) : '';
+            var eqShort = r.eqType ? equipTypeShort(r.eqType, r.vrId) : '';
             ymsTableRows += '<tr class="' + (r.matched ? 'debug-matched' : 'debug-unmatched') + '" style="' + (!r.matched ? 'background:rgba(255,82,82,0.08)' : '') + '">'
                 + '<td style="font-family:monospace;font-weight:bold;font-size:11px;color:' + (r.matched ? '#e0e0e0' : '#ff5252') + ';white-space:nowrap">' + r.code + '</td>'
                 + '<td>' + (r.matched ? '<span style="color:#69f0ae">\u2705</span> <span style="font-size:9px;color:#8899aa">' + r.elNames + '</span>' : '<span style="color:#ff5252">\u274C</span>') + '</td>'
@@ -5548,8 +5662,7 @@ document.getElementById('gitsync-token')?.addEventListener('focus', function(e) 
 // ============================================================
 // GIT SYNC — source: git-sync.js
 // ============================================================
-// === GIT SYNC ===
-// ============================================================
+﻿// === GIT SYNC ===
 // GITSYNC — Auto-push map changes to GitHub
 // ============================================================
 const GitSync = {
@@ -5562,7 +5675,7 @@ const GitSync = {
     _pushing: false,
     _lastPushHash: '',
     _lastKnownCount: 0,     // ← TU — safety check for catastrophic loss
-    _backupKey: 'gitsync_last_backup',  // ← i ten też jeśli dodajesz daily backup
+    _backupKey: 'gitsync_last_backup',  // ← i ten też jeÅ›li dodajesz daily backup
     enabled: false,
 
     _getToken() { return GM_getValue('gitsync_pat', ''); },
@@ -5774,7 +5887,7 @@ this._lastKnownCount = elCount;
 // ============================================================
 // APP — source: app.js
 // ============================================================
-// === APP ===
+﻿// === APP ===
 // ============================================================
 // FMC SHELL — save site code + intercept for bonus data
 // ============================================================
@@ -5842,7 +5955,6 @@ if (/trans-logistics-eu\.amazon\.com\/yms/i.test(location.href)) {
     return;
 }
 
-
 // MAIN — bootstrap
 // ============================================================
 function bootMain() {
@@ -5851,7 +5963,7 @@ function bootMain() {
     R.init('cvs');
     R.render();
     UI.refreshList();
-    UI.setStatus(`✅ v3.4.1 | ${State.elements.length} el | ${State.editMode ? '🔓' : '🔒'}`);
+    UI.setStatus(`✅ v3.5.1 | ${State.elements.length} el | ${State.editMode ? '🔓' : '🔒'}`);
     try { Minimap.init(); } catch(e) { console.warn('[Minimap] init failed:', e); }
     try { GitSync.init(); } catch(e) { console.warn('[GitSync] init failed:', e); }
 try { unsafeWindow.__SM = { State, YMS, FMC, Dockmaster, RELAT, MapManager, MatchIndex, ymsGetVrIds }; } catch(e) {}
@@ -5868,7 +5980,5 @@ if (document.readyState === 'loading') {
 } else {
     bootMain();
 }
-
-})();
 
 })();
