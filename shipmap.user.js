@@ -129,15 +129,31 @@ function parseRoute(raw, { stripPrefix = true, stripSuffix = true } = {}) {
 // ============================================================
 function isSwapBody(eq) { return eq ? eq.toUpperCase().replace(/[^A-Z0-9]/g, '').includes('SWAP') : false; }
 function isOneSwapBody(eq) { if (!eq) return false; const u = eq.toUpperCase().replace(/[^A-Z0-9]/g, ''); return u.includes('ONESWAP') || u.includes('1SWAP') || u === 'ONESWAPBODY'; }
-function equipTypeShort(eq) {
+function equipTypeShort(eq, vrId, subCarrier) {
     if (!eq) return '';
+    // FMC cross-reference for precise equipment classification
+    if (vrId && typeof FMC !== 'undefined' && FMC._vrIdClassMap?.size) {
+        const fmcData = FMC._vrIdClassMap.get(vrId.toUpperCase());
+        if (fmcData?.tour) {
+            const fEq = (fmcData.tour.equipmentType || '').toUpperCase();
+            const fSub = (fmcData.tour.subcarrier || '').toUpperCase();
+            if (fEq.includes('DROP')) return fSub.includes('ATS') ? 'ATS' : 'DROP';
+        }
+    }
+    // Check subCarrier from SSP/caller for ATS classification
+    if (subCarrier) {
+        const sc = subCarrier.toUpperCase();
+        if (sc.includes('ATS')) return 'ATS';
+    }
     const u = eq.toUpperCase().replace(/[^A-Z0-9_ ]/g, '');
-    if (isOneSwapBody(eq)) return '1SW'; if (u.includes('SWAP')) return 'SW';
+    if (isOneSwapBody(eq)) return '1SW'; if (u.includes('SWAP')) return '2SW';
     if (u.includes('SEVEN_HALF') || u.includes('SEVENHALFTONTRUCK')) return '7.5t';
     if (u.includes('SPRINTER')) return 'SPR'; if (u.includes('BOX_TRUCK') || u.includes('BOXTRUCK')) return 'BOX';
     if (u.includes('THREE_WHEELER') || u.includes('THREEWHEELER')) return '3WH';
     if (u.includes('REFRIGER')) return 'REF'; if (u.includes('SKIRTED')) return 'SKR';
-    if (u.includes('SOFT')) return 'SFT'; if (u.includes('TRAILER')) return 'TRL';
+    if (u.includes('SOFT')) return 'SFT';
+    if (u.includes('DROP')) return 'DROP';
+    if (u.includes('TRAILER')) return 'DET';
     return eq.substring(0, 3).toUpperCase();
 }
 function equipTypeColor(eq) {
@@ -579,11 +595,11 @@ const SSP = {
     async fetchData() {
         State.dataLoading = true; UI.updateDataPanel();
         try {
-            const now = Date.now(), startDate = now - 24 * 3600000, endDate = now + 3 * 24 * 3600000;
+            const now = Date.now(), startDate = now - 24 * 3600000, endDate = now + 7 * 24 * 3600000;
             const url = `${CONFIG.baseUrl}/ssp/dock/hrz/ob/fetchdata?entity=getOutboundDockView&nodeId=${CONFIG.warehouseId}&startDate=${startDate}&endDate=${endDate}&loadCategories=outboundScheduled,outboundInProgress,outboundReadyToDepart&shippingPurposeType=TRANSSHIPMENT,NON-TRANSSHIPMENT,SHIP_WITH_AMAZON`;
             const data = await this._fetchJSON(url);
             const aaData = data?.ret?.aaData || [], allRows = [];
-            for (const item of aaData) { const ld = item.load; if (!ld || !ld.route) continue; allRows.push({ route:this._parseRoute(ld.route), rawRoute:ld.route, vrId:ld.vrId, status:ld.status, statusLabel:this._statusLabel(ld.status), statusShort:this._statusShort(ld.status), statusColor:this._statusColor(ld.status), carrier:ld.carrier, cpt:ld.criticalPullTime||'—', sdt:ld.scheduledDepartureTime||'—', dockDoor:item.resource?.[0]?.label||'—', trailer:item.trailer?.trailerNumber||'—', equipmentType:ld.equipmentType||'', loadGroupId:ld.loadGroupId, planId:ld.planId, trailerId:item.trailer?.trailerId||'', trailerNumber:item.trailer?.trailerNumber||'', facilityStatus:this._facilityStatus(ld.status), _expanded:false, _containers:null, _containersLoading:false }); }
+            for (const item of aaData) { const ld = item.load; if (!ld || !ld.route) continue; allRows.push({ route:this._parseRoute(ld.route), rawRoute:ld.route, vrId:ld.vrId, status:ld.status, statusLabel:this._statusLabel(ld.status), statusShort:this._statusShort(ld.status), statusColor:this._statusColor(ld.status), carrier:ld.carrier, subCarrier:ld.subCarrier||'', cpt:ld.criticalPullTime||'—', sdt:ld.scheduledDepartureTime||'—', dockDoor:item.resource?.[0]?.label||'—', trailer:item.trailer?.trailerNumber||'—', equipmentType:ld.equipmentType||'', loadGroupId:ld.loadGroupId, planId:ld.planId, trailerId:item.trailer?.trailerId||'', trailerNumber:item.trailer?.trailerNumber||'', facilityStatus:this._facilityStatus(ld.status), _expanded:false, _containers:null, _containersLoading:false }); }
             const vrIdCount = new Map(); for (const row of allRows) { if (!row.vrId) continue; vrIdCount.set(row.vrId, (vrIdCount.get(row.vrId)||0)+1); }
             const seen = new Set(), preLoads = []; let swapFiltered = 0;
             for (const row of allRows) { if (seen.has(row.planId)) continue; seen.add(row.planId); if (SiteSettings.filterSwapBefore && isSwapBody(row.equipmentType) && !isOneSwapBody(row.equipmentType)) { if ((vrIdCount.get(row.vrId)||0) < 2) { swapFiltered++; continue; } } preLoads.push(row); }
@@ -1818,7 +1834,7 @@ _buildCompletedSet(rawList) {
 // MAP MANAGER — source: views/map-manager.js
 // ============================================================
 ﻿// === MAP MANAGER ===
-// MAP MANAGER â€” GitHub maps + local snapshots
+// MAP MANAGER — GitHub maps + local snapshots
 // ============================================================
 const MapManager = {
     _ghBase: 'https://raw.githubusercontent.com/homziukl/Ship-Map-Builder/main/',
@@ -1830,7 +1846,7 @@ const MapManager = {
 
     async fetchFromGitHub(site) {
         const url = this.getGhUrl(site);
-        console.log(`[ShipMap:Maps] ðŸ“¥ Fetching: ${url}`);
+        console.log(`[ShipMap:Maps] 📥 Fetching: ${url}`);
         return new Promise((resolve, reject) => {
             GM_xmlhttpRequest({
                 method: 'GET',
@@ -1853,7 +1869,7 @@ const MapManager = {
         });
     },
 
-    // â”€â”€ Local snapshot management â”€â”€
+    // ── Local snapshot management ──
 
     getList() {
         try {
@@ -1872,7 +1888,7 @@ const MapManager = {
         const data = State.exportJSON();
         const meta = {
             key,
-            label: label || `${CONFIG.warehouseId} â€” ${new Date().toLocaleString()}`,
+            label: label || `${CONFIG.warehouseId} — ${new Date().toLocaleString()}`,
             site: CONFIG.warehouseId,
             elementCount: State.elements.length,
             savedAt: new Date().toISOString()
@@ -1923,11 +1939,11 @@ const Summary = {
         const remaining = Math.max(0, shift.endDate - now);
         const remH = Math.floor(remaining / 3600000), remM = Math.floor((remaining % 3600000) / 60000);
         const shiftProgress = Math.min(100, Math.max(0, ((now - shift.startDate) / (shift.endDate - shift.startDate)) * 100));
-        const loads = State.sspLoads.filter(l => { if (!l.sdt || l.sdt === 'â€”') { return l.status !== 'DEPARTED' && l.status !== 'CANCELLED'; } try { const sdtDate = new Date(l.sdt); if (isNaN(sdtDate.getTime())) return true; return sdtDate >= shift.startDate && sdtDate <= shift.endDate; } catch { return true; } });
+        const loads = State.sspLoads.filter(l => { if (!l.sdt || l.sdt === '—') { return l.status !== 'DEPARTED' && l.status !== 'CANCELLED'; } try { const sdtDate = new Date(l.sdt); if (isNaN(sdtDate.getTime())) return true; return sdtDate >= shift.startDate && sdtDate <= shift.endDate; } catch { return true; } });
         const departed=loads.filter(l=>l.status==='DEPARTED').length, loading=loads.filter(l=>l.status==='LOADING_IN_PROGRESS').length, finished=loads.filter(l=>l.status==='FINISHED_LOADING').length, attached=loads.filter(l=>l.status==='TRAILER_ATTACHED').length, ready=loads.filter(l=>l.status==='READY_TO_DEPART').length, readyForLoad=loads.filter(l=>l.status==='READY_FOR_LOADING').length, scheduled=loads.filter(l=>l.status==='SCHEDULED').length, cancelled=loads.filter(l=>l.status==='CANCELLED').length;
         const inProgress = loading + finished + attached + ready;
         const carriers = {}; for (const l of loads) { const c = l.carrier || 'Unknown'; if (!carriers[c]) carriers[c] = {total:0,departed:0,loading:0,scheduled:0}; carriers[c].total++; if (l.status === 'DEPARTED') carriers[c].departed++; else if (l.status === 'SCHEDULED') carriers[c].scheduled++; else carriers[c].loading++; }
-        const activeDocks = new Set(loads.filter(l => l.dockDoor !== 'â€”' && l.status !== 'DEPARTED' && l.status !== 'CANCELLED').map(l => l.dockDoor));
+        const activeDocks = new Set(loads.filter(l => l.dockDoor !== '—' && l.status !== 'DEPARTED' && l.status !== 'CANCELLED').map(l => l.dockDoor));
         const ymsReport = YMS.buildReport(); let ymsTotal = 0, ymsEmpty = 0, ymsFull = 0, ymsUnavail = 0;
         for (const [, data] of ymsReport) { ymsTotal += data.total; ymsEmpty += data.empty; ymsFull += data.full; ymsUnavail += data.unavailable; }
         const ymsOccupied = State.ymsLocations.filter(l => l.yardAssets?.some(a => a.type !== 'TRACTOR')).length;
@@ -1949,25 +1965,25 @@ const Summary = {
 
         const carrierRows=Object.entries(d.loads.carriers).sort((a,b)=>b[1].total-a[1].total).slice(0,8).map(([name,c])=>`<tr><td style="font-weight:bold;color:#e0e0e0">${name}</td><td class="val" style="color:#9e9e9e">${c.departed}</td><td class="val" style="color:#69f0ae">${c.loading}</td><td class="val" style="color:#5a6a7a">${c.scheduled}</td><td class="val" style="color:#ff9900">${c.total}</td></tr>`).join('');
 
-        const ymsRows=d.yms.report.map(([owner,data2])=>`<tr><td style="font-weight:bold;font-family:monospace;color:#e0e0e0">${owner}</td><td class="val" style="color:#69f0ae">${data2.empty||'â€”'}</td><td class="val" style="color:#ffd600">${data2.full||'â€”'}</td><td class="cnt ${data2.unavailable>0?'cnt-warn':''}">${data2.unavailable||'â€”'}</td><td class="val" style="color:#ff9900">${data2.total}</td></tr>`).join('');
+        const ymsRows=d.yms.report.map(([owner,data2])=>`<tr><td style="font-weight:bold;font-family:monospace;color:#e0e0e0">${owner}</td><td class="val" style="color:#69f0ae">${data2.empty||'—'}</td><td class="val" style="color:#ffd600">${data2.full||'—'}</td><td class="cnt ${data2.unavailable>0?'cnt-warn':''}">${data2.unavailable||'—'}</td><td class="val" style="color:#ff9900">${data2.total}</td></tr>`).join('');
 
-        const congestedRows=d.vista.topCongested.map(([loc,ld])=>{const lc=ld.totalContainers>15?'#ff1744':ld.totalContainers>8?'#ff9100':ld.totalContainers>3?'#ffd600':'#69f0ae';const types=Object.entries(ld.types).map(([t,n])=>`${n}${{PALLET:'ðŸ›’',GAYLORD:'ðŸ“«',CART:'ðŸ›’'}[t]||''}`).join(' ');return`<tr><td style="font-family:monospace;font-weight:bold;color:${lc}">${loc}</td><td class="val" style="color:${lc}">${ld.totalContainers}</td><td class="val" style="color:#b0bec5">${ld.totalPkgs}</td><td style="font-size:10px;color:#78909C">${types}</td></tr>`;}).join('');
+        const congestedRows=d.vista.topCongested.map(([loc,ld])=>{const lc=ld.totalContainers>15?'#ff1744':ld.totalContainers>8?'#ff9100':ld.totalContainers>3?'#ffd600':'#69f0ae';const types=Object.entries(ld.types).map(([t,n])=>`${n}${{PALLET:'🛒',GAYLORD:'📫',CART:'🛒'}[t]||''}`).join(' ');return`<tr><td style="font-family:monospace;font-weight:bold;color:${lc}">${loc}</td><td class="val" style="color:${lc}">${ld.totalContainers}</td><td class="val" style="color:#b0bec5">${ld.totalPkgs}</td><td style="font-size:10px;color:#78909C">${types}</td></tr>`;}).join('');
 
         const dwellRows=d.vista.topDwell.map(([loc,ld])=>{const dwC=ld.maxDwell>120?'#ff5252':ld.maxDwell>60?'#ff9100':'#69f0ae';return`<tr><td style="font-family:monospace;color:#e0e0e0">${loc}</td><td class="val" style="color:${dwC};font-weight:bold">${ld.maxDwell}m</td><td class="val" style="color:#b0bec5">${ld.totalContainers}</td></tr>`;}).join('');
 
-        return `<div class="summary-hdr"><h2>ðŸ“Š Shift Summary â€” <span class="shift-badge">${d.shift.label}</span> <span class="time-badge">${fmtTime(d.shift.startDate)} â†’ ${fmtTime(d.shift.endDate)}</span></h2><div style="display:flex;align-items:center;gap:12px"><span style="font-size:11px;color:#8899aa">â± ${d.remH}h ${d.remM}m left</span><button class="summary-close" id="summary-close">âœ•</button></div></div><div class="summary-body"><div style="margin-bottom:12px"><div style="display:flex;justify-content:space-between;font-size:10px;color:#5a6a7a;margin-bottom:4px"><span>Shift progress</span><span>${Math.round(d.shiftProgress)}%</span></div><div class="summary-bar"><div class="summary-bar-fill" style="width:${d.shiftProgress}%;background:linear-gradient(90deg,#ff9900,#ff5722)"></div></div></div><div class="summary-grid"><div class="summary-card"><h3>ðŸ“¡ OB Loads</h3><div class="summary-kpi"><div class="summary-kpi-item"><span class="summary-kpi-val" style="color:#ff9900">${d.loads.total}</span><span class="summary-kpi-label">Total</span></div><div class="summary-kpi-item"><span class="summary-kpi-val" style="color:#9e9e9e">${d.loads.departed}</span><span class="summary-kpi-label">Departed</span></div><div class="summary-kpi-item"><span class="summary-kpi-val" style="color:#69f0ae">${d.loads.inProgress}</span><span class="summary-kpi-label">In Progress</span></div><div class="summary-kpi-item"><span class="summary-kpi-val" style="color:#5a6a7a">${d.loads.scheduled}</span><span class="summary-kpi-label">Scheduled</span></div></div><div style="margin-top:4px"><div style="display:flex;justify-content:space-between;font-size:10px;color:#5a6a7a;margin-bottom:3px"><span>Departed</span><span>${departedPct}%</span></div><div class="summary-bar"><div class="summary-bar-fill" style="width:${departedPct}%;background:#69f0ae"></div></div></div><div style="display:flex;gap:8px;flex-wrap:wrap;font-size:10px;margin-top:4px"><span style="color:#69f0ae">ðŸ”„${d.loads.loading}L</span><span style="color:#ffd600">âœ…${d.loads.finished}C</span><span style="color:#4fc3f7">ðŸ”—${d.loads.attached}ATT</span><span style="color:#ff9800">ðŸš›${d.loads.ready}RTD</span>${d.loads.readyForLoad?`<span style="color:#80cbc4">ðŸ“‹${d.loads.readyForLoad}RFL</span>`:''}</div><div style="font-size:10px;color:#e040fb;margin-top:2px">ðŸšª ${d.loads.activeDocks} active docks</div></div><div class="summary-card"><h3>ðŸ—ï¸ YMS Yard</h3><div class="summary-kpi"><div class="summary-kpi-item"><span class="summary-kpi-val" style="color:#ff9900">${d.yms.total}</span><span class="summary-kpi-label">Trailers</span></div><div class="summary-kpi-item"><span class="summary-kpi-val" style="color:#69f0ae">${d.yms.empty}</span><span class="summary-kpi-label">Empty</span></div><div class="summary-kpi-item"><span class="summary-kpi-val" style="color:#ffd600">${d.yms.full}</span><span class="summary-kpi-label">Full</span></div><div class="summary-kpi-item"><span class="summary-kpi-val" style="color:#ff5252">${d.yms.unavail}</span><span class="summary-kpi-label">Unavail</span></div></div><div style="margin-top:4px"><div style="display:flex;justify-content:space-between;font-size:10px;color:#5a6a7a;margin-bottom:3px"><span>Yard utilization</span><span>${d.yms.utilization}%</span></div><div class="summary-bar"><div class="summary-bar-fill" style="width:${d.yms.utilization}%;background:${d.yms.utilization>85?'#ff1744':d.yms.utilization>65?'#ff9100':'#69f0ae'}"></div></div></div><div style="font-size:10px;color:#78909C;margin-top:4px">${d.yms.occupied}/${d.yms.totalLocs} spots occupied</div></div><div class="summary-card" style="grid-column:1/-1"><h3>ðŸ“¦ Vista Congestion</h3><div class="summary-kpi"><div class="summary-kpi-item"><span class="summary-kpi-val" style="color:#ff9900">${d.vista.total}</span><span class="summary-kpi-label">Containers</span></div><div class="summary-kpi-item"><span class="summary-kpi-val" style="color:#b0bec5">${d.vista.totalPkgs}</span><span class="summary-kpi-label">Packages</span></div><div class="summary-kpi-item"><span class="summary-kpi-val" style="color:#4fc3f7">${d.vista.stacked}</span><span class="summary-kpi-label">ðŸ“¥Stacked</span></div><div class="summary-kpi-item"><span class="summary-kpi-val" style="color:#ffd600">${d.vista.staged}</span><span class="summary-kpi-label">ðŸ“¤Staged</span></div><div class="summary-kpi-item"><span class="summary-kpi-val" style="color:#69f0ae">${d.vista.loaded}</span><span class="summary-kpi-label">ðŸš›Loaded</span></div><div class="summary-kpi-item"><span class="summary-kpi-val" style="color:${d.vista.avgDwell>120?'#ff5252':d.vista.avgDwell>60?'#ff9100':'#69f0ae'}">${d.vista.avgDwell}m</span><span class="summary-kpi-label">Avg Dwell</span></div><div class="summary-kpi-item"><span class="summary-kpi-val" style="color:${d.vista.maxDwell>120?'#ff5252':'#ff9100'}">${d.vista.maxDwell}m</span><span class="summary-kpi-label">Max Dwell</span></div></div><div style="display:flex;gap:12px;margin-top:8px;font-size:11px"><span><span style="display:inline-block;width:8px;height:8px;border-radius:50%;background:#69f0ae;margin-right:4px"></span>Low:${d.vista.congestion.low}</span><span><span style="display:inline-block;width:8px;height:8px;border-radius:50%;background:#ffd600;margin-right:4px"></span>Med:${d.vista.congestion.medium}</span><span><span style="display:inline-block;width:8px;height:8px;border-radius:50%;background:#ff9100;margin-right:4px"></span>High:${d.vista.congestion.high}</span><span><span style="display:inline-block;width:8px;height:8px;border-radius:50%;background:#ff1744;margin-right:4px"></span>Crit:${d.vista.congestion.critical}</span></div></div><div class="summary-card"><h3>ðŸš› By Carrier</h3><table class="summary-table"><thead><tr><th>Carrier</th><th style="text-align:center">DEP</th><th style="text-align:center">Active</th><th style="text-align:center">Sched</th><th style="text-align:center">Total</th></tr></thead><tbody>${carrierRows||'<tr><td colspan="5" style="color:#5a6a7a;text-align:center">No data</td></tr>'}</tbody></table></div><div class="summary-card"><h3>ðŸ—ï¸ By Owner</h3><table class="summary-table"><thead><tr><th>Owner</th><th style="text-align:center">âˆ…</th><th style="text-align:center">ðŸ“¦</th><th style="text-align:center">âš ï¸</th><th style="text-align:center">Tot</th></tr></thead><tbody>${ymsRows||'<tr><td colspan="5" style="color:#5a6a7a;text-align:center">No data</td></tr>'}</tbody></table></div><div class="summary-card"><h3>ðŸ”´ Top Congested</h3><table class="summary-table"><thead><tr><th>Location</th><th style="text-align:center">Cnt</th><th style="text-align:center">Pkg</th><th>Types</th></tr></thead><tbody>${congestedRows||'<tr><td colspan="4" style="color:#5a6a7a;text-align:center">No data</td></tr>'}</tbody></table></div><div class="summary-card"><h3>â± Longest Dwell</h3><table class="summary-table"><thead><tr><th>Location</th><th style="text-align:center">Max</th><th style="text-align:center">Cnt</th></tr></thead><tbody>${dwellRows||'<tr><td colspan="3" style="color:#5a6a7a;text-align:center">No data</td></tr>'}</tbody></table></div></div></div><div class="summary-footer"><span style="font-size:10px;color:#5a6a7a">ðŸ“Š ${CONFIG.warehouseId} Â· ${d.shift.label} Â· ${d.now.toLocaleString()}</span><div style="display:flex;gap:6px"><button class="btn sm" id="summary-copy">ðŸ“‹ Copy</button><button class="btn sm" id="summary-refresh">ðŸ”„ Refresh</button></div></div>`;
+        return `<div class="summary-hdr"><h2>📊 Shift Summary — <span class="shift-badge">${d.shift.label}</span> <span class="time-badge">${fmtTime(d.shift.startDate)} → ${fmtTime(d.shift.endDate)}</span></h2><div style="display:flex;align-items:center;gap:12px"><span style="font-size:11px;color:#8899aa">⏱ ${d.remH}h ${d.remM}m left</span><button class="summary-close" id="summary-close">✕</button></div></div><div class="summary-body"><div style="margin-bottom:12px"><div style="display:flex;justify-content:space-between;font-size:10px;color:#5a6a7a;margin-bottom:4px"><span>Shift progress</span><span>${Math.round(d.shiftProgress)}%</span></div><div class="summary-bar"><div class="summary-bar-fill" style="width:${d.shiftProgress}%;background:linear-gradient(90deg,#ff9900,#ff5722)"></div></div></div><div class="summary-grid"><div class="summary-card"><h3>📡 OB Loads</h3><div class="summary-kpi"><div class="summary-kpi-item"><span class="summary-kpi-val" style="color:#ff9900">${d.loads.total}</span><span class="summary-kpi-label">Total</span></div><div class="summary-kpi-item"><span class="summary-kpi-val" style="color:#9e9e9e">${d.loads.departed}</span><span class="summary-kpi-label">Departed</span></div><div class="summary-kpi-item"><span class="summary-kpi-val" style="color:#69f0ae">${d.loads.inProgress}</span><span class="summary-kpi-label">In Progress</span></div><div class="summary-kpi-item"><span class="summary-kpi-val" style="color:#5a6a7a">${d.loads.scheduled}</span><span class="summary-kpi-label">Scheduled</span></div></div><div style="margin-top:4px"><div style="display:flex;justify-content:space-between;font-size:10px;color:#5a6a7a;margin-bottom:3px"><span>Departed</span><span>${departedPct}%</span></div><div class="summary-bar"><div class="summary-bar-fill" style="width:${departedPct}%;background:#69f0ae"></div></div></div><div style="display:flex;gap:8px;flex-wrap:wrap;font-size:10px;margin-top:4px"><span style="color:#69f0ae">🔄${d.loads.loading}L</span><span style="color:#ffd600">✅${d.loads.finished}C</span><span style="color:#4fc3f7">🔗${d.loads.attached}ATT</span><span style="color:#ff9800">🚛${d.loads.ready}RTD</span>${d.loads.readyForLoad?`<span style="color:#80cbc4">📋${d.loads.readyForLoad}RFL</span>`:''}</div><div style="font-size:10px;color:#e040fb;margin-top:2px">🚪 ${d.loads.activeDocks} active docks</div></div><div class="summary-card"><h3>🏗️ YMS Yard</h3><div class="summary-kpi"><div class="summary-kpi-item"><span class="summary-kpi-val" style="color:#ff9900">${d.yms.total}</span><span class="summary-kpi-label">Trailers</span></div><div class="summary-kpi-item"><span class="summary-kpi-val" style="color:#69f0ae">${d.yms.empty}</span><span class="summary-kpi-label">Empty</span></div><div class="summary-kpi-item"><span class="summary-kpi-val" style="color:#ffd600">${d.yms.full}</span><span class="summary-kpi-label">Full</span></div><div class="summary-kpi-item"><span class="summary-kpi-val" style="color:#ff5252">${d.yms.unavail}</span><span class="summary-kpi-label">Unavail</span></div></div><div style="margin-top:4px"><div style="display:flex;justify-content:space-between;font-size:10px;color:#5a6a7a;margin-bottom:3px"><span>Yard utilization</span><span>${d.yms.utilization}%</span></div><div class="summary-bar"><div class="summary-bar-fill" style="width:${d.yms.utilization}%;background:${d.yms.utilization>85?'#ff1744':d.yms.utilization>65?'#ff9100':'#69f0ae'}"></div></div></div><div style="font-size:10px;color:#78909C;margin-top:4px">${d.yms.occupied}/${d.yms.totalLocs} spots occupied</div></div><div class="summary-card" style="grid-column:1/-1"><h3>📦 Vista Congestion</h3><div class="summary-kpi"><div class="summary-kpi-item"><span class="summary-kpi-val" style="color:#ff9900">${d.vista.total}</span><span class="summary-kpi-label">Containers</span></div><div class="summary-kpi-item"><span class="summary-kpi-val" style="color:#b0bec5">${d.vista.totalPkgs}</span><span class="summary-kpi-label">Packages</span></div><div class="summary-kpi-item"><span class="summary-kpi-val" style="color:#4fc3f7">${d.vista.stacked}</span><span class="summary-kpi-label">📥Stacked</span></div><div class="summary-kpi-item"><span class="summary-kpi-val" style="color:#ffd600">${d.vista.staged}</span><span class="summary-kpi-label">📤Staged</span></div><div class="summary-kpi-item"><span class="summary-kpi-val" style="color:#69f0ae">${d.vista.loaded}</span><span class="summary-kpi-label">🚛Loaded</span></div><div class="summary-kpi-item"><span class="summary-kpi-val" style="color:${d.vista.avgDwell>120?'#ff5252':d.vista.avgDwell>60?'#ff9100':'#69f0ae'}">${d.vista.avgDwell}m</span><span class="summary-kpi-label">Avg Dwell</span></div><div class="summary-kpi-item"><span class="summary-kpi-val" style="color:${d.vista.maxDwell>120?'#ff5252':'#ff9100'}">${d.vista.maxDwell}m</span><span class="summary-kpi-label">Max Dwell</span></div></div><div style="display:flex;gap:12px;margin-top:8px;font-size:11px"><span><span style="display:inline-block;width:8px;height:8px;border-radius:50%;background:#69f0ae;margin-right:4px"></span>Low:${d.vista.congestion.low}</span><span><span style="display:inline-block;width:8px;height:8px;border-radius:50%;background:#ffd600;margin-right:4px"></span>Med:${d.vista.congestion.medium}</span><span><span style="display:inline-block;width:8px;height:8px;border-radius:50%;background:#ff9100;margin-right:4px"></span>High:${d.vista.congestion.high}</span><span><span style="display:inline-block;width:8px;height:8px;border-radius:50%;background:#ff1744;margin-right:4px"></span>Crit:${d.vista.congestion.critical}</span></div></div><div class="summary-card"><h3>🚛 By Carrier</h3><table class="summary-table"><thead><tr><th>Carrier</th><th style="text-align:center">DEP</th><th style="text-align:center">Active</th><th style="text-align:center">Sched</th><th style="text-align:center">Total</th></tr></thead><tbody>${carrierRows||'<tr><td colspan="5" style="color:#5a6a7a;text-align:center">No data</td></tr>'}</tbody></table></div><div class="summary-card"><h3>🏗️ By Owner</h3><table class="summary-table"><thead><tr><th>Owner</th><th style="text-align:center">∅</th><th style="text-align:center">📦</th><th style="text-align:center">⚠️</th><th style="text-align:center">Tot</th></tr></thead><tbody>${ymsRows||'<tr><td colspan="5" style="color:#5a6a7a;text-align:center">No data</td></tr>'}</tbody></table></div><div class="summary-card"><h3>🔴 Top Congested</h3><table class="summary-table"><thead><tr><th>Location</th><th style="text-align:center">Cnt</th><th style="text-align:center">Pkg</th><th>Types</th></tr></thead><tbody>${congestedRows||'<tr><td colspan="4" style="color:#5a6a7a;text-align:center">No data</td></tr>'}</tbody></table></div><div class="summary-card"><h3>⏱ Longest Dwell</h3><table class="summary-table"><thead><tr><th>Location</th><th style="text-align:center">Max</th><th style="text-align:center">Cnt</th></tr></thead><tbody>${dwellRows||'<tr><td colspan="3" style="color:#5a6a7a;text-align:center">No data</td></tr>'}</tbody></table></div></div></div><div class="summary-footer"><span style="font-size:10px;color:#5a6a7a">📊 ${CONFIG.warehouseId} · ${d.shift.label} · ${d.now.toLocaleString()}</span><div style="display:flex;gap:6px"><button class="btn sm" id="summary-copy">📋 Copy</button><button class="btn sm" id="summary-refresh">🔄 Refresh</button></div></div>`;
     },
 
     toClipboard(d) {
         const fmtTime=(date)=>`${date.getHours().toString().padStart(2,'0')}:${date.getMinutes().toString().padStart(2,'0')}`;
-        let t = `ðŸ“Š SHIFT SUMMARY â€” ${CONFIG.warehouseId} ${d.shift.label}\n${fmtTime(d.shift.startDate)} â†’ ${fmtTime(d.shift.endDate)} | ${d.remH}h ${d.remM}m remaining\n${'â•'.repeat(50)}\n\n`;
-        t += `ðŸ“¡ OB LOADS: ${d.loads.total} total\n âœˆï¸ Departed: ${d.loads.departed} ðŸ”„ Loading: ${d.loads.loading} âœ… Finished: ${d.loads.finished}\n ðŸ”— Attached: ${d.loads.attached} ðŸš› Ready: ${d.loads.ready} ðŸ“‹ Scheduled: ${d.loads.scheduled}\n ðŸšª Active docks: ${d.loads.activeDocks}\n\n`;
-        t += `ðŸ—ï¸ YMS YARD: ${d.yms.total} trailers\n âˆ… Empty: ${d.yms.empty} ðŸ“¦ Full: ${d.yms.full} âš ï¸ Unavail: ${d.yms.unavail}\n Utilization: ${d.yms.utilization}% (${d.yms.occupied}/${d.yms.totalLocs})\n`;
-        for (const [owner, od] of d.yms.report) t += ` ${owner}: ${od.total} (âˆ…${od.empty} ðŸ“¦${od.full} âš ${od.unavailable})\n`;
-        t += `\nðŸ“¦ VISTA: ${d.vista.total} containers / ${d.vista.totalPkgs} pkgs\n ðŸ“¥ Stacked: ${d.vista.stacked} ðŸ“¤ Staged: ${d.vista.staged} ðŸš› Loaded: ${d.vista.loaded}\n â± Avg dwell: ${d.vista.avgDwell}m Max: ${d.vista.maxDwell}m\n ðŸŸ¢${d.vista.congestion.low} ðŸŸ¡${d.vista.congestion.medium} ðŸŸ ${d.vista.congestion.high} ðŸ”´${d.vista.congestion.critical}\n\n`;
-        if (d.vista.topCongested.length) { t += `ðŸ”´ TOP CONGESTED:\n`; for (const [loc, ld] of d.vista.topCongested) t += ` ${loc}: ${ld.totalContainers} cnt / ${ld.totalPkgs} pkg / ${ld.maxDwell}m dwell\n`; t += '\n'; }
-        if (d.vista.topDwell.length) { t += `â± LONGEST DWELL:\n`; for (const [loc, ld] of d.vista.topDwell) t += ` ${loc}: ${ld.maxDwell}m / ${ld.totalContainers} cnt\n`; }
-        t += `\n${'â•'.repeat(50)}\nGenerated: ${d.now.toLocaleString()} | Ship Map v3.4.0`; return t;
+        let t = `📊 SHIFT SUMMARY — ${CONFIG.warehouseId} ${d.shift.label}\n${fmtTime(d.shift.startDate)} → ${fmtTime(d.shift.endDate)} | ${d.remH}h ${d.remM}m remaining\n${'═'.repeat(50)}\n\n`;
+        t += `📡 OB LOADS: ${d.loads.total} total\n ✈️ Departed: ${d.loads.departed} 🔄 Loading: ${d.loads.loading} ✅ Finished: ${d.loads.finished}\n 🔗 Attached: ${d.loads.attached} 🚛 Ready: ${d.loads.ready} 📋 Scheduled: ${d.loads.scheduled}\n 🚪 Active docks: ${d.loads.activeDocks}\n\n`;
+        t += `🏗️ YMS YARD: ${d.yms.total} trailers\n ∅ Empty: ${d.yms.empty} 📦 Full: ${d.yms.full} ⚠️ Unavail: ${d.yms.unavail}\n Utilization: ${d.yms.utilization}% (${d.yms.occupied}/${d.yms.totalLocs})\n`;
+        for (const [owner, od] of d.yms.report) t += ` ${owner}: ${od.total} (∅${od.empty} 📦${od.full} ⚠${od.unavailable})\n`;
+        t += `\n📦 VISTA: ${d.vista.total} containers / ${d.vista.totalPkgs} pkgs\n 📥 Stacked: ${d.vista.stacked} 📤 Staged: ${d.vista.staged} 🚛 Loaded: ${d.vista.loaded}\n ⏱ Avg dwell: ${d.vista.avgDwell}m Max: ${d.vista.maxDwell}m\n 🟢${d.vista.congestion.low} 🟡${d.vista.congestion.medium} 🟠${d.vista.congestion.high} 🔴${d.vista.congestion.critical}\n\n`;
+        if (d.vista.topCongested.length) { t += `🔴 TOP CONGESTED:\n`; for (const [loc, ld] of d.vista.topCongested) t += ` ${loc}: ${ld.totalContainers} cnt / ${ld.totalPkgs} pkg / ${ld.maxDwell}m dwell\n`; t += '\n'; }
+        if (d.vista.topDwell.length) { t += `⏱ LONGEST DWELL:\n`; for (const [loc, ld] of d.vista.topDwell) t += ` ${loc}: ${ld.maxDwell}m / ${ld.totalContainers} cnt\n`; }
+        t += `\n${'═'.repeat(50)}\nGenerated: ${d.now.toLocaleString()} | Ship Map v3.4.0`; return t;
     },
 
 };
@@ -2018,7 +2034,7 @@ const Trend = {
 
     _renderSvgChart(opts) {
         const { data, width, height, series, yMin, yMax, showGrid } = opts;
-        if (!data.length) return '<div style="padding:20px;text-align:center;color:#5a6a7a;font-size:11px">No data yet â€” snapshots every 10 min</div>';
+        if (!data.length) return '<div style="padding:20px;text-align:center;color:#5a6a7a;font-size:11px">No data yet — snapshots every 10 min</div>';
         const pad = { top: 10, right: 12, bottom: 28, left: 40 };
         const cw = width - pad.left - pad.right;
         const ch = height - pad.top - pad.bottom;
@@ -2198,7 +2214,7 @@ _drawElements() {
 
         const isLoose = isHL && hl?.onlyLoose;
 
-        // â”€â”€ Focus mode â”€â”€
+        // ── Focus mode ──
         const hasFocus = State.focusRoutes.size > 0;
         const focusData = (!isHL && hasFocus) ? State.getFocusForElement(el) : null;
         const focusEntries = focusData ? Object.entries(focusData).sort((a, b) => b[1].count - a[1].count) : null;
@@ -2217,20 +2233,20 @@ _drawElements() {
         const isSearchMatch = hasSearch && State.mapSearchMatches.has(el.id),
               searchDimmed  = hasSearch && !isSearchMatch;
 
-        // â”€â”€ Fill / border color â”€â”€
+        // ── Fill / border color ──
         let fillC, brdC;
         if (isHL) { fillC = hlFill; brdC = hlBrd; }
         else if (focusDominant) { fillC = focusDominant[1].color; brdC = darkenColor(focusDominant[1].color); }
         else if (ymsOv) { fillC = ymsOv.fill; brdC = ymsOv.border; }
         else { fillC = t.color; brdC = t.border; }
 
-        // â”€â”€ Focus glow â”€â”€
+        // ── Focus glow ──
         if (focusDominant && !isHL) {
             ctx.shadowColor = focusDominant[1].color;
             ctx.shadowBlur = 12;
         }
 
-        // â”€â”€ Highlight / selection glow â”€â”€
+        // ── Highlight / selection glow ──
         if (isSel || isHov || isHL || isSearchMatch) {
             ctx.shadowColor = isDel && isHov ? '#ff1744' : (isSearchMatch && !isHL ? '#42a5f5' : (isHL ? hlGlw : (ymsOv ? ymsOv.glow : t.color)));
             ctx.shadowBlur = isHL ? (isLoose ? 6 : (12 + Math.sin(State.highlightPulse * Math.PI * 2) * 8)) : (isSearchMatch ? 14 : (isSel ? 20 : 10));
@@ -2239,14 +2255,14 @@ _drawElements() {
             ctx.shadowBlur = 8;
         }
 
-        // â”€â”€ Fill rect â”€â”€
+        // ── Fill rect ──
         ctx.globalAlpha = (dimmed || searchDimmed) ? 0.12 : (isDel && isHov ? 0.5 : (isHL ? (isLoose ? 0.65 : 0.95) : (focusDominant ? 0.9 : (ymsOv ? 0.9 : 0.85))));
         if (isSearchMatch && !isHL) ctx.globalAlpha = 1;
 
         ctx.fillStyle = isDel && isHov ? 'rgba(255,23,68,0.4)' : fillC;
         ctx.fillRect(el.x, el.y, el.w, el.h);
 
-        // â”€â”€ Stroke â”€â”€
+        // ── Stroke ──
         ctx.globalAlpha = 1;
         ctx.strokeStyle = isSel ? '#ffffff' : ((dimmed || searchDimmed) ? 'rgba(255,255,255,0.1)' : (isSearchMatch ? '#42a5f5' : brdC));
 
@@ -2258,7 +2274,7 @@ _drawElements() {
         ctx.shadowColor = 'transparent';
         ctx.shadowBlur = 0;
 
-        // â”€â”€ Labels â”€â”€
+        // ── Labels ──
         if (el.w >= 50 && el.h >= 18) {
 
             ctx.save();
@@ -2278,7 +2294,7 @@ _drawElements() {
 
             let txt = el.name || el.id;
             const mw = el.w - 6;
-            if (ctx.measureText(txt).width > mw) { while (txt.length > 1 && ctx.measureText(txt + 'â€¦').width > mw) txt = txt.slice(0, -1); txt += 'â€¦'; }
+            if (ctx.measureText(txt).width > mw) { while (txt.length > 1 && ctx.measureText(txt + '…').width > mw) txt = txt.slice(0, -1); txt += '…'; }
             ctx.fillText(txt, el.x + 4, el.y + 8);
 
             // Chute
@@ -2287,24 +2303,24 @@ _drawElements() {
                 ctx.fillStyle = isHL ? '#90caf9' : '#82b1ff';
                 let ct = el.chute;
                 if (ctx.measureText(ct).width > mw) { const parts = ct.split('-'); ct = parts[parts.length - 1] || ct; }
-                if (ctx.measureText(ct).width > mw) { while (ct.length > 1 && ctx.measureText(ct + 'â€¦').width > mw) ct = ct.slice(0, -1); ct += 'â€¦'; }
+                if (ctx.measureText(ct).width > mw) { while (ct.length > 1 && ctx.measureText(ct + '…').width > mw) ct = ct.slice(0, -1); ct += '…'; }
                 ctx.fillText(ct, el.x + 4, el.y + 20);
             }
 
-            // â”€â”€ Trailer icon (no highlight, no dim, no focus) â”€â”€
+            // ── Trailer icon (no highlight, no dim, no focus) ──
             if (!isHL && !dimmed && !searchDimmed && !focusData && el.w >= 40 && el.h >= 40) {
                 const ymsLoc = State.getYmsForElement(el);
                 this._drawTrailerIcon(ctx, el, ymsLoc);
             }
 
-            // â”€â”€ Small trailer label (no highlight, no dim, no focus) â”€â”€
+            // ── Small trailer label (no highlight, no dim, no focus) ──
             else if (!isHL && !dimmed && !searchDimmed && !focusData && el.w >= 60 && el.h >= 32) {
                 const ymsLoc = State.getYmsForElement(el);
                 if (ymsLoc?.yardAssets?.length) {
                     const trailer = ymsLoc.yardAssets.find(a => a.type !== 'TRACTOR');
                     if (trailer) {
-                        const icon = TRAILER_LABELS[trailer.type] || 'ðŸš›';
-                        const sts = trailer.status === 'IN_PROGRESS' ? 'â³' : (trailer.status === 'FULL' ? 'ðŸ“¦' : (trailer.status === 'EMPTY' ? 'âˆ…' : ''));
+                        const icon = TRAILER_LABELS[trailer.type] || '🚛';
+                        const sts = trailer.status === 'IN_PROGRESS' ? '⏳' : (trailer.status === 'FULL' ? '📦' : (trailer.status === 'EMPTY' ? '∅' : ''));
                         const yLine = el.chute ? (el.h >= 44 ? el.y + 36 : el.y + 20) : (el.h >= 30 ? el.y + 22 : null);
                         if (yLine) {
                             ctx.font = 'bold 8px "Amazon Ember",Arial,sans-serif';
@@ -2315,11 +2331,11 @@ _drawElements() {
                 }
             }
 
-            // â”€â”€ Vista badge (no highlight, no dim, no focus) â”€â”€
+            // ── Vista badge (no highlight, no dim, no focus) ──
             if (!isHL && !dimmed && !searchDimmed && !focusData && el.w >= 60 && el.h >= 28) {
                 const vd = State.vistaElementMap?.[el.name || el.id];
                 if (vd && vd.totalContainers > 0) {
-                    const TS2 = { 'PALLET': 'ðŸ›’', 'GAYLORD': 'ðŸ“«', 'CART': 'ðŸ›’', 'BAG': 'ðŸ‘œ' };
+                    const TS2 = { 'PALLET': '🛒', 'GAYLORD': '📫', 'CART': '🛒', 'BAG': '👜' };
                     const summary = Object.entries(vd.types).map(([tp, n]) => `${n}${TS2[tp] || ''}`).join('');
                     const yBase = el.chute ? (el.h >= 52 ? el.y + 44 : el.y + 28) : (el.h >= 38 ? el.y + 28 : null);
                     if (yBase) {
@@ -2328,12 +2344,12 @@ _drawElements() {
                         ctx.fillStyle = level === 'critical' ? '#ff1744' : level === 'high' ? '#ff9100' : level === 'medium' ? '#ffd600' : '#69f0ae';
                         const effMax = getEffectiveMaxContainers(el.name || el.id);
                         const ratioText = effMax.max > 0 ? `${vd.totalContainers}/${effMax.max}` : '';
-                        ctx.fillText(`ðŸ“¦${summary}${ratioText ? ' ' + ratioText : ''}`, el.x + 4, yBase);
+                        ctx.fillText(`📦${summary}${ratioText ? ' ' + ratioText : ''}`, el.x + 4, yBase);
                     }
                 }
             }
 
-            // â”€â”€ STEM badge (skip stacking locations, no highlight, no dim, no focus) â”€â”€
+            // ── STEM badge (skip stacking locations, no highlight, no dim, no focus) ──
             if (CONFIG.data.stemEnabled && !/STAGE|HOT.?PICK|GENERAL/i.test(el.name || '') && !isHL && !dimmed && !searchDimmed && !focusData && el.w >= 60 && el.h >= 28) {
                 const sd = State.stemElementMap?.[el.name || el.id];
                 if (sd) {
@@ -2344,34 +2360,34 @@ _drawElements() {
                     if (yBase) {
                         ctx.font = 'bold 8px "Amazon Ember",Arial,sans-serif';
                         ctx.fillStyle = sd.assigned ? '#00bcd4' : '#78909C';
-                        const label = sd.assigned ? `ðŸ”€${sd.direction}` : 'ðŸ”€âŠ˜';
+                        const label = sd.assigned ? `🔀${sd.direction}` : '🔀⊘';
                         ctx.fillText(label, el.x + 4, yBase);
                     }
                 }
             }
 
-            // â”€â”€ Focus mode badge â”€â”€
+            // ── Focus mode badge ──
             if (focusData && !isHL && !dimmed && el.w >= 60 && el.h >= 28) {
                 const focusBadge = focusEntries.map(([route, data]) => `${route}:${data.count}`).join(' ');
                 const yBase = el.chute ? (el.h >= 52 ? el.y + 44 : el.y + 28) : (el.h >= 38 ? el.y + 28 : null);
                 if (yBase) {
                     ctx.font = 'bold 8px "Amazon Ember",Arial,sans-serif';
                     ctx.fillStyle = focusDominant[1].color;
-                    ctx.fillText(`ðŸŽ¯${focusBadge}`, el.x + 4, yBase);
+                    ctx.fillText(`🎯${focusBadge}`, el.x + 4, yBase);
                 }
             }
 
-            // â”€â”€ Dwell text (loose highlight) â”€â”€
+            // ── Dwell text (loose highlight) ──
             if (isLoose && el.h >= (el.chute ? 44 : 30)) {
                 ctx.font = 'bold 8px "Amazon Ember",Arial,sans-serif';
                 ctx.fillStyle = '#90a4ae';
-                ctx.fillText('ðŸ“¬ dwell', el.x + 4, el.y + (el.chute ? 36 : 24));
+                ctx.fillText('📬 dwell', el.x + 4, el.y + (el.chute ? 36 : 24));
             }
 
             ctx.restore();
         }
 
-        // â”€â”€ Resize handles â”€â”€
+        // ── Resize handles ──
         if (isSel && State.selectedIds.size === 1 && State.mode === MODE.SELECT && State.editMode) {
             for (const h of this._handles(el)) {
                 ctx.fillStyle = '#fff';
@@ -2391,30 +2407,30 @@ _drawElements() {
         if (State.isMoving || State.isDrawing || State.isPanning || State.isBoxSelecting || State.isResizing) return;
         const { ctx } = this, mx = State.mouseScreenX, my = State.mouseScreenY, type = ELEMENT_TYPES[el.type], hl = State.getHighlight(el), lines = [];
         lines.push({ text:el.name||el.id, color:'#fff', font:'bold 13px "Amazon Ember",Arial,sans-serif' });
-        if (el.chute) lines.push({ text:'ðŸ”— '+el.chute, color:'#82b1ff', font:'11px "Amazon Ember",Arial,sans-serif' });
+        if (el.chute) lines.push({ text:'🔗 '+el.chute, color:'#82b1ff', font:'11px "Amazon Ember",Arial,sans-serif' });
         if (type) lines.push({ text:type.label, color:type.color, font:'11px "Amazon Ember",Arial,sans-serif' });
         if (hl) {
-            if (hl.ymsMatch && !hl.totalPkgs && !hl.loosePkgs && Object.keys(hl.containers).length === 0) { lines.push({ text:'â”€â”€ YMS MATCH â”€â”€', color:'#ff9900', font:'9px "Amazon Ember",Arial,sans-serif' }); lines.push({ text:`ðŸš› VR ID on ${hl.ymsLocCode || 'yard'}`, color:'#4fc3f7', font:'bold 11px "Amazon Ember",Arial,sans-serif' }); if (hl.ymsSource === 'annotation') lines.push({ text:'ðŸ“ found in annotation', color:'#ffd600', font:'10px "Amazon Ember",Arial,sans-serif' }); }
-            else { lines.push({ text:'â”€â”€ SSP â”€â”€', color:'#ff9900', font:'9px "Amazon Ember",Arial,sans-serif' }); if (hl.ymsMatch) lines.push({ text:`ðŸš› VR on ${hl.ymsLocCode||'yard'}${hl.ymsSource==='annotation'?' ðŸ“':''}`, color:'#4fc3f7', font:'10px "Amazon Ember",Arial,sans-serif' }); if (hl.onlyLoose) lines.push({ text:`ðŸ“¬ ${hl.loosePkgs} dwelling`, color:'#90a4ae', font:'bold 11px "Amazon Ember",Arial,sans-serif' }); else { const TS = {'PALLET':'ðŸ›’Pal','GAYLORD':'ðŸ“«Gay','BAG':'ðŸ‘œBag','CART':'ðŸ›’Cart'}; const cp = Object.entries(hl.containers).map(([t2,n])=>`${TS[t2]||t2}:${n}`); if (cp.length) lines.push({ text:cp.join(' '), color:'#ffd600', font:'bold 11px "Amazon Ember",Arial,sans-serif' }); } lines.push({ text:`Î£ ${hl.totalPkgs}pkg Â· ${hl.totalWeight}kg`, color:hl.onlyLoose?'#90a4ae':'#ff9900', font:'bold 11px "Amazon Ember",Arial,sans-serif' }); }
+            if (hl.ymsMatch && !hl.totalPkgs && !hl.loosePkgs && Object.keys(hl.containers).length === 0) { lines.push({ text:'── YMS MATCH ──', color:'#ff9900', font:'9px "Amazon Ember",Arial,sans-serif' }); lines.push({ text:`🚛 VR ID on ${hl.ymsLocCode || 'yard'}`, color:'#4fc3f7', font:'bold 11px "Amazon Ember",Arial,sans-serif' }); if (hl.ymsSource === 'annotation') lines.push({ text:'📝 found in annotation', color:'#ffd600', font:'10px "Amazon Ember",Arial,sans-serif' }); }
+            else { lines.push({ text:'── SSP ──', color:'#ff9900', font:'9px "Amazon Ember",Arial,sans-serif' }); if (hl.ymsMatch) lines.push({ text:`🚛 VR on ${hl.ymsLocCode||'yard'}${hl.ymsSource==='annotation'?' 📝':''}`, color:'#4fc3f7', font:'10px "Amazon Ember",Arial,sans-serif' }); if (hl.onlyLoose) lines.push({ text:`📬 ${hl.loosePkgs} dwelling`, color:'#90a4ae', font:'bold 11px "Amazon Ember",Arial,sans-serif' }); else { const TS = {'PALLET':'🛒Pal','GAYLORD':'📫Gay','BAG':'👜Bag','CART':'🛒Cart'}; const cp = Object.entries(hl.containers).map(([t2,n])=>`${TS[t2]||t2}:${n}`); if (cp.length) lines.push({ text:cp.join(' '), color:'#ffd600', font:'bold 11px "Amazon Ember",Arial,sans-serif' }); } lines.push({ text:`Î£ ${hl.totalPkgs}pkg · ${hl.totalWeight}kg`, color:hl.onlyLoose?'#90a4ae':'#ff9900', font:'bold 11px "Amazon Ember",Arial,sans-serif' }); }
         }
         const vistaData = State.vistaElementMap?.[el.name || el.id];
         if (vistaData && vistaData.totalContainers > 0) {
             const level = VISTA.getCongestionLevel(el.name || el.id);
-            const levelIcon = {low:'ðŸŸ¢',medium:'ðŸŸ¡',high:'ðŸŸ ',critical:'ðŸ”´'}[level]||'âšª';
+            const levelIcon = {low:'🟢',medium:'🟡',high:'🟠',critical:'🔴'}[level]||'⚪';
 
-            lines.push({ text:'â”€â”€ VISTA â”€â”€', color:'#5a6a7a', font:'9px "Amazon Ember",Arial,sans-serif' });
+            lines.push({ text:'── VISTA ──', color:'#5a6a7a', font:'9px "Amazon Ember",Arial,sans-serif' });
 
             const effMax = getEffectiveMaxContainers(el.name || el.id);
             let capText = '';
             if (effMax.max > 0) {
                 const pct = Math.round(vistaData.totalContainers / effMax.max * 100);
-                const sourceTag = effMax.source === 'manual' ? '' : `âš¡${effMax.label}`;
+                const sourceTag = effMax.source === 'manual' ? '' : `⚡${effMax.label}`;
                 capText = `/ ${effMax.max} (${pct}%)${sourceTag}`;
             }
 
-            lines.push({ text:`${levelIcon} ${vistaData.totalContainers}${capText} containers Â· ${vistaData.totalPkgs} pkgs`, color: VISTA.getCongestionColor(level)?.fill || '#69f0ae', font:'bold 11px "Amazon Ember",Arial,sans-serif' });
+            lines.push({ text:`${levelIcon} ${vistaData.totalContainers}${capText} containers · ${vistaData.totalPkgs} pkgs`, color: VISTA.getCongestionColor(level)?.fill || '#69f0ae', font:'bold 11px "Amazon Ember",Arial,sans-serif' });
 
-            const TS3 = {'PALLET':'ðŸ›’Pal','GAYLORD':'ðŸ“«Gay','CART':'ðŸ›’Cart','BAG':'ðŸ‘œBag'};
+            const TS3 = {'PALLET':'🛒Pal','GAYLORD':'📫Gay','CART':'🛒Cart','BAG':'👜Bag'};
             const tp = Object.entries(vistaData.types).map(([t2,n]) => `${TS3[t2]||t2}:${n}`).join(' ');
             if (tp) lines.push({ text:tp, color:'#b0bec5', font:'10px "Amazon Ember",Arial,sans-serif' });
 
@@ -2423,51 +2439,51 @@ _drawElements() {
 
             if (vistaData.maxDwell > 0) {
                 const dwC = vistaData.maxDwell > 120 ? '#ff5252' : (vistaData.maxDwell > 60 ? '#ff9100' : '#8899aa');
-                lines.push({ text:`â± max dwell ${vistaData.maxDwell}m`, color:dwC, font:'10px "Amazon Ember",Arial,sans-serif' });
+                lines.push({ text:`⏱ max dwell ${vistaData.maxDwell}m`, color:dwC, font:'10px "Amazon Ember",Arial,sans-serif' });
             }
 
-            if (vistaData.criticalCount > 0) lines.push({ text:`ðŸš¨ ${vistaData.criticalCount} critical pkgs`, color:'#ff1744', font:'bold 10px "Amazon Ember",Arial,sans-serif' });
+            if (vistaData.criticalCount > 0) lines.push({ text:`🚨 ${vistaData.criticalCount} critical pkgs`, color:'#ff1744', font:'bold 10px "Amazon Ember",Arial,sans-serif' });
 
             if (vistaData.routes) {
                 const routeEntries = Object.entries(vistaData.routes).sort((a, b) => b[1].count - a[1].count);
                 for (const [r2, d2] of routeEntries) {
                     const rShort = parseRoute(r2);
-                    lines.push({ text:`â†’ ${rShort} Ã—${d2.count} (${d2.pkgs}pkg)`, color:'#546E7A', font:'9px "Amazon Ember",Arial,sans-serif' });
+                    lines.push({ text:`→ ${rShort} ×—${d2.count} (${d2.pkgs}pkg)`, color:'#546E7A', font:'9px "Amazon Ember",Arial,sans-serif' });
                 }
             }
         }
-// â† koniec if (vistaData && vistaData.totalContainers > 0)        }
+// ← koniec if (vistaData && vistaData.totalContainers > 0)        }
         // STEM sortation data (skip stacking locations)
         if (CONFIG.data.stemEnabled && !/STAGE|HOT.?PICK|GENERAL/i.test(el.name || '')) {
             const stemData = State.stemElementMap?.[el.name || el.id];
             if (stemData) {
-                lines.push({ text: 'â”€â”€ STEM â”€â”€', color: '#5a6a7a', font: '9px "Amazon Ember",Arial,sans-serif' });
+                lines.push({ text: '── STEM ──', color: '#5a6a7a', font: '9px "Amazon Ember",Arial,sans-serif' });
                 if (stemData.assigned) {
-                    lines.push({ text: `ðŸ”€ ${stemData.direction}`, color: '#00bcd4', font: 'bold 11px "Amazon Ember",Arial,sans-serif' });
+                    lines.push({ text: `🔀 ${stemData.direction}`, color: '#00bcd4', font: 'bold 11px "Amazon Ember",Arial,sans-serif' });
                     if (stemData.allDirections.length > 1) {
                         lines.push({ text: `+ ${stemData.allDirections.slice(1).join(', ')}`, color: '#80deea', font: '9px "Amazon Ember",Arial,sans-serif' });
                     }
                     if (stemData.startTime || stemData.endTime) {
-                        lines.push({ text: `â± ${stemData.startTime || '?'} â†’ ${stemData.endTime || '?'}`, color: '#8899aa', font: '10px "Amazon Ember",Arial,sans-serif' });
+                        lines.push({ text: `⏱ ${stemData.startTime || '?'} → ${stemData.endTime || '?'}`, color: '#8899aa', font: '10px "Amazon Ember",Arial,sans-serif' });
                     }
                     if (stemData.userLogin) {
-                        lines.push({ text: `ðŸ‘¤ ${stemData.userLogin}`, color: '#78909C', font: '9px "Amazon Ember",Arial,sans-serif' });
+                        lines.push({ text: `👤 ${stemData.userLogin}`, color: '#78909C', font: '9px "Amazon Ember",Arial,sans-serif' });
                     }
                 } else {
-                    lines.push({ text: 'âŠ˜ Brak przypisania', color: '#78909C', font: '10px "Amazon Ember",Arial,sans-serif' });
+                    lines.push({ text: '⊘ Brak przypisania', color: '#78909C', font: '10px "Amazon Ember",Arial,sans-serif' });
                 }
             }
         }
         // FMC cross-ref
         const ymsLoc2 = State.getYmsForElement(el);
         if (ymsLoc2?.yardAssets?.length && FMC.tours.length) {
-            for (const asset of ymsLoc2.yardAssets) { if (asset.type === 'TRACTOR') continue; const trailerId = asset.licensePlateIdentifier?.registrationIdentifier || asset.vehicleNumber || asset.assetId || ''; if (trailerId) { const fmcTour = FMC.findByTrailer(trailerId); if (fmcTour) { lines.push({ text:'â”€â”€ FMC â”€â”€', color:'#e040fb', font:'9px "Amazon Ember",Arial,sans-serif' }); lines.push({ text:`${fmcTour.direction} Â· ${fmcTour.shipperCategory}`, color:'#e040fb', font:'10px "Amazon Ember",Arial,sans-serif' }); if (fmcTour.arrivalDelayMin > 15 || fmcTour.departureDelayMin > 15) lines.push({ text:`âš  delay +${Math.max(fmcTour.arrivalDelayMin, fmcTour.departureDelayMin)}m`, color:'#ff5252', font:'bold 10px "Amazon Ember",Arial,sans-serif' }); break; } } }
+            for (const asset of ymsLoc2.yardAssets) { if (asset.type === 'TRACTOR') continue; const trailerId = asset.licensePlateIdentifier?.registrationIdentifier || asset.vehicleNumber || asset.assetId || ''; if (trailerId) { const fmcTour = FMC.findByTrailer(trailerId); if (fmcTour) { lines.push({ text:'── FMC ──', color:'#e040fb', font:'9px "Amazon Ember",Arial,sans-serif' }); lines.push({ text:`${fmcTour.direction} · ${fmcTour.shipperCategory}`, color:'#e040fb', font:'10px "Amazon Ember",Arial,sans-serif' }); if (fmcTour.arrivalDelayMin > 15 || fmcTour.departureDelayMin > 15) lines.push({ text:`⚠ delay +${Math.max(fmcTour.arrivalDelayMin, fmcTour.departureDelayMin)}m`, color:'#ff5252', font:'bold 10px "Amazon Ember",Arial,sans-serif' }); break; } } }
         }
         // YMS assets
         const ymsLoc = State.getYmsForElement(el);
         if (ymsLoc?.yardAssets?.length) {
-            lines.push({ text:'â”€â”€ YMS â”€â”€', color:'#5a6a7a', font:'9px "Amazon Ember",Arial,sans-serif' });
-            for (const asset of ymsLoc.yardAssets) { if (asset.type === 'TRACTOR') continue; const icon = TRAILER_LABELS[asset.type] || 'ðŸš›'; const plate = asset.licensePlateIdentifier?.registrationIdentifier || asset.vehicleNumber || 'â€”'; const owner = asset.owner?.shortName || asset.broker?.shortName || ''; lines.push({ text:`${icon} ${plate} Â· ${owner} Â· ${asset.status||''}`, color:'#b0bec5', font:'11px "Amazon Ember",Arial,sans-serif' }); const vrIds = ymsGetVrIds(asset); if (vrIds.length) { const lane = asset.load?.lane || asset.load?.routes?.[0] || ''; lines.push({ text:`ðŸ”— ${vrIds[0]}${lane ? ' â†’ '+lane : ''}`, color:'#4fc3f7', font:'10px "Amazon Ember",Arial,sans-serif' }); } const atLoc = asset.datetimeOfArrivalAtLocation?.parsedValue; if (atLoc) lines.push({ text:`â± ${dwellFromEpoch(atLoc)}`, color:'#8899aa', font:'10px "Amazon Ember",Arial,sans-serif' }); if (asset.unavailable && asset.unavailableReason) { const color = YMS_RED_REASONS.has(asset.unavailableReason) ? '#ff5252' : '#ffd600'; lines.push({ text:`âš ï¸ ${asset.unavailableReason.replace(/_/g,' ')}`, color, font:'bold 10px "Amazon Ember",Arial,sans-serif' }); } if (asset.annotation) { let ann = asset.annotation.replace(/\n/g,' ').trim(); if (ann.length > 55) ann = ann.substring(0,52)+'â€¦'; lines.push({ text:`ðŸ“ ${ann}`, color:'#78909C', font:'9px "Amazon Ember",Arial,sans-serif' }); } }
+            lines.push({ text:'── YMS ──', color:'#5a6a7a', font:'9px "Amazon Ember",Arial,sans-serif' });
+            for (const asset of ymsLoc.yardAssets) { if (asset.type === 'TRACTOR') continue; const icon = TRAILER_LABELS[asset.type] || '🚛'; const plate = asset.licensePlateIdentifier?.registrationIdentifier || asset.vehicleNumber || '—'; const owner = asset.owner?.shortName || asset.broker?.shortName || ''; lines.push({ text:`${icon} ${plate} · ${owner} · ${asset.status||''}`, color:'#b0bec5', font:'11px "Amazon Ember",Arial,sans-serif' }); const vrIds = ymsGetVrIds(asset); if (vrIds.length) { const lane = asset.load?.lane || asset.load?.routes?.[0] || ''; lines.push({ text:`🔗 ${vrIds[0]}${lane ? ' → '+lane : ''}`, color:'#4fc3f7', font:'10px "Amazon Ember",Arial,sans-serif' }); } const atLoc = asset.datetimeOfArrivalAtLocation?.parsedValue; if (atLoc) lines.push({ text:`⏱ ${dwellFromEpoch(atLoc)}`, color:'#8899aa', font:'10px "Amazon Ember",Arial,sans-serif' }); if (asset.unavailable && asset.unavailableReason) { const color = YMS_RED_REASONS.has(asset.unavailableReason) ? '#ff5252' : '#ffd600'; lines.push({ text:`⚠️ ${asset.unavailableReason.replace(/_/g,' ')}`, color, font:'bold 10px "Amazon Ember",Arial,sans-serif' }); } if (asset.annotation) { let ann = asset.annotation.replace(/\n/g,' ').trim(); if (ann.length > 55) ann = ann.substring(0,52)+'…'; lines.push({ text:`📝 ${ann}`, color:'#78909C', font:'9px "Amazon Ember",Arial,sans-serif' }); } }
         }
         // Draw tooltip box
         const lH = 16, pX = 12, pY = 8; let maxW = 0; for (const l of lines) { ctx.font = l.font; const w = ctx.measureText(l.text).width; if (w > maxW) maxW = w; }
@@ -2493,63 +2509,63 @@ _drawElements() {
         const { ctx, canvas: c } = this; let cx = 10;
         ctx.font = 'bold 12px "Amazon Ember",Arial'; ctx.textAlign = 'left'; ctx.textBaseline = 'middle';
 
-        const ml = {select:'ðŸ–±ï¸ SELECT',add:'âž• ADD',delete:'ðŸ—‘ï¸ DELETE'}, mc = {select:'#4fc3f7',add:'#69f0ae',delete:'#ff5252'};
+        const ml = {select:'🖱️ SELECT',add:'➕ ADD',delete:'🗑️ DELETE'}, mc = {select:'#4fc3f7',add:'#69f0ae',delete:'#ff5252'};
 
         ctx.fillStyle = 'rgba(0,0,0,0.75)'; ctx.beginPath(); ctx.roundRect(cx, c.height-42, 130, 28, 6); ctx.fill();
         ctx.fillStyle = mc[State.mode]; ctx.fillText(ml[State.mode], cx+10, c.height-28); cx += 140;
 
         if (State.selectedIds.size > 0) { const t = `${State.selectedIds.size} sel`, tw = ctx.measureText(t).width+20; ctx.fillStyle = 'rgba(0,0,0,0.75)'; ctx.beginPath(); ctx.roundRect(cx, c.height-42, tw, 28, 6); ctx.fill(); ctx.fillStyle = '#ff9900'; ctx.fillText(t, cx+10, c.height-28); cx += tw+10; }
 
-        if (State.undoStack.length > 0) { const t = `â†©${State.undoStack.length}`, tw = ctx.measureText(t).width+20; ctx.fillStyle = 'rgba(0,0,0,0.55)'; ctx.beginPath(); ctx.roundRect(cx, c.height-42, tw, 28, 6); ctx.fill(); ctx.fillStyle = '#80cbc4'; ctx.fillText(t, cx+10, c.height-28); cx += tw+10; }
+        if (State.undoStack.length > 0) { const t = `↩${State.undoStack.length}`, tw = ctx.measureText(t).width+20; ctx.fillStyle = 'rgba(0,0,0,0.55)'; ctx.beginPath(); ctx.roundRect(cx, c.height-42, tw, 28, 6); ctx.fill(); ctx.fillStyle = '#80cbc4'; ctx.fillText(t, cx+10, c.height-28); cx += tw+10; }
 
         if (State.highlightedLoadIdx >= 0) {
             const ld = State.sspLoads[State.highlightedLoadIdx]; const vrId = ld?.vrId||''; const yiAll = State.findYmsForVrId(vrId);
-            const yt = yiAll ? `âœ…${yiAll.length > 1 ? 'Ã—' + yiAll.length : ''}` : 'âŒ';
+            const yt = yiAll ? `✅${yiAll.length > 1 ? '×' + yiAll.length : ''}` : '❌';
             const mt = State.elements.filter(el2 => State.isHighlighted(el2)).length, tt = Object.keys(State.highlightData).length;
-            const t = `ðŸ”¦${ld?.route||'?'} ${yt} ${mt}/${tt}`, tw = ctx.measureText(t).width+20;
+            const t = `🔦${ld?.route||'?'} ${yt} ${mt}/${tt}`, tw = ctx.measureText(t).width+20;
             ctx.fillStyle = 'rgba(255,153,0,0.2)'; ctx.beginPath(); ctx.roundRect(cx, c.height-42, tw, 28, 6); ctx.fill();
             ctx.strokeStyle = '#ff9900'; ctx.lineWidth = 1; ctx.beginPath(); ctx.roundRect(cx, c.height-42, tw, 28, 6); ctx.stroke();
             ctx.fillStyle = '#ff9900'; ctx.fillText(t, cx+10, c.height-28); cx += tw+10;
         }
 
         if (State.highlightedVrId && State.highlightedLoadIdx < 0) {
-            const t = `ðŸš›${State.highlightedVrId.substring(0,12)}`, tw = ctx.measureText(t).width+20;
+            const t = `🚛${State.highlightedVrId.substring(0,12)}`, tw = ctx.measureText(t).width+20;
             ctx.fillStyle = 'rgba(79,195,247,0.2)'; ctx.beginPath(); ctx.roundRect(cx, c.height-42, tw, 28, 6); ctx.fill();
             ctx.strokeStyle = '#4fc3f7'; ctx.lineWidth = 1; ctx.beginPath(); ctx.roundRect(cx, c.height-42, tw, 28, 6); ctx.stroke();
             ctx.fillStyle = '#4fc3f7'; ctx.fillText(t, cx+10, c.height-28); cx += tw+10;
         }
 
         if (State.mapSearch) {
-            const t = `ðŸ”${State.mapSearchMatches.size}`, tw = ctx.measureText(t).width+20;
+            const t = `🔍${State.mapSearchMatches.size}`, tw = ctx.measureText(t).width+20;
             ctx.fillStyle = 'rgba(66,165,245,0.2)'; ctx.beginPath(); ctx.roundRect(cx, c.height-42, tw, 28, 6); ctx.fill();
             ctx.strokeStyle = '#42a5f5'; ctx.lineWidth = 1; ctx.beginPath(); ctx.roundRect(cx, c.height-42, tw, 28, 6); ctx.stroke();
             ctx.fillStyle = '#42a5f5'; ctx.fillText(t, cx+10, c.height-28); cx += tw+10;
         }
 
-        if (State.ymsLastUpdated) { const t = 'ðŸ—ï¸YMS', tw = ctx.measureText(t).width+20; ctx.fillStyle = 'rgba(0,0,0,0.5)'; ctx.beginPath(); ctx.roundRect(cx, c.height-42, tw, 28, 6); ctx.fill(); ctx.fillStyle = '#69f0ae'; ctx.fillText(t, cx+10, c.height-28); cx += tw+10; }
+        if (State.ymsLastUpdated) { const t = '🏗️YMS', tw = ctx.measureText(t).width+20; ctx.fillStyle = 'rgba(0,0,0,0.5)'; ctx.beginPath(); ctx.roundRect(cx, c.height-42, tw, 28, 6); ctx.fill(); ctx.fillStyle = '#69f0ae'; ctx.fillText(t, cx+10, c.height-28); cx += tw+10; }
 
-        if (State.vistaLastUpdated) { const t = 'ðŸ“¦VIS', tw = ctx.measureText(t).width+20; ctx.fillStyle = 'rgba(0,0,0,0.5)'; ctx.beginPath(); ctx.roundRect(cx, c.height-42, tw, 28, 6); ctx.fill(); ctx.fillStyle = '#ff9100'; ctx.fillText(t, cx+10, c.height-28); cx += tw+10; }
+        if (State.vistaLastUpdated) { const t = '📦VIS', tw = ctx.measureText(t).width+20; ctx.fillStyle = 'rgba(0,0,0,0.5)'; ctx.beginPath(); ctx.roundRect(cx, c.height-42, tw, 28, 6); ctx.fill(); ctx.fillStyle = '#ff9100'; ctx.fillText(t, cx+10, c.height-28); cx += tw+10; }
 
-        if (State.stemLastUpdated) { const t = 'ðŸ”€STEM', tw = ctx.measureText(t).width+20; ctx.fillStyle = 'rgba(0,0,0,0.5)'; ctx.beginPath(); ctx.roundRect(cx, c.height-42, tw, 28, 6); ctx.fill(); ctx.fillStyle = '#00bcd4'; ctx.fillText(t, cx+10, c.height-28); cx += tw+10; }
+        if (State.stemLastUpdated) { const t = '🔀STEM', tw = ctx.measureText(t).width+20; ctx.fillStyle = 'rgba(0,0,0,0.5)'; ctx.beginPath(); ctx.roundRect(cx, c.height-42, tw, 28, 6); ctx.fill(); ctx.fillStyle = '#00bcd4'; ctx.fillText(t, cx+10, c.height-28); cx += tw+10; }
 
-        if (FMC.lastUpdated) { const t = `ðŸš›FMC:${FMC.tours.length}`, tw = ctx.measureText(t).width+20; ctx.fillStyle = 'rgba(0,0,0,0.5)'; ctx.beginPath(); ctx.roundRect(cx, c.height-42, tw, 28, 6); ctx.fill(); ctx.fillStyle = '#e040fb'; ctx.fillText(t, cx+10, c.height-28); cx += tw+10; }
+        if (FMC.lastUpdated) { const t = `🚛FMC:${FMC.tours.length}`, tw = ctx.measureText(t).width+20; ctx.fillStyle = 'rgba(0,0,0,0.5)'; ctx.beginPath(); ctx.roundRect(cx, c.height-42, tw, 28, 6); ctx.fill(); ctx.fillStyle = '#e040fb'; ctx.fillText(t, cx+10, c.height-28); cx += tw+10; }
         if (State.focusRoutes.size > 0) {
             let focusTotal = 0;
             for (const el2 of State.elements) {
                 const fd = State.getFocusForElement(el2);
                 if (fd) focusTotal += Object.values(fd).reduce((s, r) => s + r.count, 0);
             }
-            const t = `ðŸŽ¯${State.focusRoutes.size}r ${focusTotal}cnt`, tw = ctx.measureText(t).width + 20;
+            const t = `🎯${State.focusRoutes.size}r ${focusTotal}cnt`, tw = ctx.measureText(t).width + 20;
             ctx.fillStyle = 'rgba(255,107,107,0.2)'; ctx.beginPath(); ctx.roundRect(cx, c.height - 42, tw, 28, 6); ctx.fill();
             ctx.strokeStyle = '#FF6B6B'; ctx.lineWidth = 1; ctx.beginPath(); ctx.roundRect(cx, c.height - 42, tw, 28, 6); ctx.stroke();
             ctx.fillStyle = '#FF6B6B'; ctx.fillText(t, cx + 10, c.height - 28); cx += tw + 10;
         }
 
-        const sh = getCurrentShiftLabel(), sht = `â°${sh}`, shw = ctx.measureText(sht).width+20;
+        const sh = getCurrentShiftLabel(), sht = `⏰${sh}`, shw = ctx.measureText(sht).width+20;
         ctx.fillStyle = 'rgba(0,0,0,0.6)'; ctx.beginPath(); ctx.roundRect(c.width-shw-10, c.height-42, shw, 28, 6); ctx.fill();
         ctx.fillStyle = '#8899aa'; ctx.textAlign = 'right'; ctx.fillText(sht, c.width-20, c.height-28); ctx.textAlign = 'left';
 
-        if (!State.editMode) { ctx.fillStyle = 'rgba(0,0,0,0.75)'; ctx.beginPath(); ctx.roundRect(cx, c.height-42, 100, 28, 6); ctx.fill(); ctx.fillStyle = '#ff5252'; ctx.fillText('ðŸ”’ LOCKED', cx+10, c.height-28); }
+        if (!State.editMode) { ctx.fillStyle = 'rgba(0,0,0,0.75)'; ctx.beginPath(); ctx.roundRect(cx, c.height-42, 100, 28, 6); ctx.fill(); ctx.fillStyle = '#ff5252'; ctx.fillText('🔒 LOCKED', cx+10, c.height-28); }
     },
 
     _bindEvents() {
@@ -2570,7 +2586,7 @@ _drawElements() {
                 if (hit) { if (e.ctrlKey || e.metaKey) { if (!State.isSelected(hit)) State.addToSelection(hit); } else if (e.shiftKey) State.addToSelection(hit); else { if (!State.isSelected(hit)) State.selectOnly(hit); } State.pushUndo(); State.isMoving = true; State.ctrlDragCopied = false; State.moveStart = { x: w.x, y: w.y }; State.moveSnapshots = State.selectedElements.map(el => ({ id: el.id, x: el.x, y: el.y, w: el.w, h: el.h, type: el.type, name: el.name })); if (State.selectedIds.size === 1) UI.showInspector(State.primarySelected); else UI.showMultiInspector(); UI.refreshList(); this.render(); }
                 else { if (!e.ctrlKey && !e.metaKey && !e.shiftKey) State.clearSelection(); State.isBoxSelecting = true; State.boxStart = { x: w.x, y: w.y }; State.boxEnd = { x: w.x, y: w.y }; UI.clearInspector(); UI.refreshList(); this.render(); }
                 e.preventDefault();
-                   // â”€â”€ Touch events â”€â”€
+                   // ── Touch events ──
         var _touches = { startDist: 0, startScale: 1, startMid: null, lastTap: 0, panning: false, panStart: null };
         function _getTouchDist(t1, t2) { return Math.hypot(t2.clientX - t1.clientX, t2.clientY - t1.clientY); }
         function _getTouchMid(t1, t2) { return { x: (t1.clientX + t2.clientX) / 2, y: (t1.clientY + t2.clientY) / 2 }; }
@@ -2590,7 +2606,7 @@ _drawElements() {
                 var touch = e.touches[0], now = Date.now();
                 var mx = touch.clientX - r.left, my = touch.clientY - r.top;
                 var w = rSelf.s2w(mx, my);
-                // Double tap â†’ zoom
+                // Double tap → zoom
                 if (now - _touches.lastTap < 300) {
                     var ns = Math.min(8, State.scale * 1.8);
                     State.offsetX = mx - (mx - State.offsetX) * (ns / State.scale);
@@ -2804,6 +2820,12 @@ select.tsel{background:#37475a;color:#e0e0e0;border:1px solid #4a5a6a;padding:4p
 .dtable{width:100%;border-collapse:collapse}.dtable th{text-align:left;font-size:9px;color:#5a6a7a;text-transform:uppercase;letter-spacing:.5px;padding:4px 8px;border-bottom:1px solid #2a3a4a;background:#0d1b2a;position:sticky;top:0;z-index:1;cursor:pointer;user-select:none;white-space:nowrap}.dtable th:hover{color:#ff9900}.dtable th.sort-active{color:#ff9900}.dtable td{padding:3px 8px;border-bottom:1px solid rgba(255,255,255,.03);font-size:11px;vertical-align:middle}.dtable tr:hover{background:rgba(255,255,255,.03)}.dtable tr.dr-matched{border-left:3px solid #ff9900}.dtable tr.dr-unmatched{opacity:.45}.dtable tr.dr-dwell{border-left:3px solid #78909C}.dtable tr[data-loc]{cursor:pointer}.dtable tr[data-loc]:hover{background:rgba(255,153,0,.1)!important}
 .dr-loc{font-family:'Amazon Ember',monospace;font-weight:bold;color:#e0e0e0;white-space:nowrap;font-size:10px}.dr-content{color:#b0bec5;display:flex;align-items:center;gap:3px;flex-wrap:nowrap;white-space:nowrap}.dr-badge{display:inline-block;padding:0px 4px;border-radius:3px;font-size:9px;font-weight:bold;white-space:nowrap}.dr-pal{background:rgba(255,214,0,.15);color:#ffd600}.dr-cart{background:rgba(0,200,83,.15);color:#69f0ae}.dr-gaylord{background:rgba(224,64,251,.15);color:#e040fb}.dr-bag{background:rgba(79,195,247,.15);color:#4fc3f7}.dr-pkg{background:rgba(120,144,156,.2);color:#90a4ae}.dr-other{background:rgba(158,158,158,.15);color:#bdbdbd}.dr-empty{background:rgba(255,82,82,.2);color:#ff5252}
 .dr-sf-row{display:flex;flex-wrap:wrap;gap:2px;margin-top:1px}.dr-sf-badge{display:inline-block;padding:0 3px;border-radius:2px;font-size:8px;font-weight:bold;font-family:'Amazon Ember',monospace;background:rgba(41,98,255,.15);color:#82b1ff;white-space:nowrap}
+.vr-runs-row{display:flex;gap:3px;flex-wrap:wrap;margin:2px 8px;align-items:center}
+.vr-run-badge{position:relative;display:inline-flex;align-items:center;gap:2px;padding:1px 5px;border-radius:3px;font-size:8px;font-weight:bold;font-family:'Amazon Ember',monospace;cursor:default;white-space:nowrap;border:1px solid rgba(255,255,255,.1)}
+.vr-run-badge .vr-eq{font-size:7px;opacity:.8}
+.vr-run-badge .vr-sdt{font-size:8px;font-weight:bold}
+.vr-run-tip{display:none;position:fixed;background:#1a2a3a;border:1px solid #3a4a5a;border-radius:4px;padding:5px 8px;font-size:9px;color:#e0e0e0;white-space:nowrap;z-index:9999;pointer-events:none;box-shadow:0 4px 12px rgba(0,0,0,.6)}
+.vr-runs-label{font-size:8px;color:#5a6a7a;margin-right:2px}
 .dr-dwell-cell{font-size:10px;color:#ffb74d;white-space:nowrap;font-weight:bold;font-family:monospace}.dr-dwell-cell.long{color:#ff5252}
 .yms-report{padding:0}.yms-rtable{width:100%;border-collapse:collapse}.yms-rtable th{text-align:left;font-size:9px;color:#5a6a7a;text-transform:uppercase;padding:5px 10px;border-bottom:1px solid #2a3a4a;background:#0d1b2a;position:sticky;top:0;z-index:1}.yms-rtable td{padding:4px 10px;border-bottom:1px solid rgba(255,255,255,.03);font-size:11px}.yms-rtable tr:hover{background:rgba(255,255,255,.03)}.yms-rtable .owner-code{font-weight:bold;font-family:'Amazon Ember',monospace;color:#e0e0e0}.yms-rtable .cnt{text-align:center;font-weight:bold;font-family:monospace}.yms-rtable .cnt-warn{color:#ff5252}.yms-rtable .cnt-ok{color:#69f0ae}.yms-rtable .priority-row{background:rgba(255,153,0,.05)}.yms-rtable .total-row{background:rgba(255,153,0,.1);font-weight:bold}.yms-rtable .total-row td{border-top:2px solid #ff9900;color:#ff9900}
 .summary-overlay{position:fixed;inset:0;z-index:10000;display:flex;align-items:center;justify-content:center;background:rgba(0,0,0,0.7);backdrop-filter:blur(4px)}.summary-panel{background:#111827;border:2px solid #ff9900;border-radius:12px;width:90vw;max-width:900px;max-height:90vh;display:flex;flex-direction:column;overflow:hidden;box-shadow:0 20px 60px rgba(0,0,0,0.8)}.summary-hdr{padding:12px 20px;display:flex;justify-content:space-between;align-items:center;background:#1a2236;border-bottom:2px solid #ff9900}.summary-hdr h2{font-size:16px;color:#ff9900;margin:0;display:flex;align-items:center;gap:8px}.summary-hdr .shift-badge{background:#ff9900;color:#000;padding:2px 10px;border-radius:10px;font-size:13px;font-weight:bold}.summary-hdr .time-badge{color:#8899aa;font-size:12px;font-family:monospace}.summary-close{background:none;border:none;color:#5a6a7a;font-size:20px;cursor:pointer;padding:4px 8px;border-radius:4px}.summary-close:hover{background:rgba(255,255,255,.1);color:#fff}.summary-body{flex:1;overflow-y:auto;padding:16px 20px}.summary-grid{display:grid;grid-template-columns:1fr 1fr;gap:16px}.summary-card{background:#1a2236;border:1px solid #2a3a4a;border-radius:8px;padding:12px 16px;display:flex;flex-direction:column;gap:8px}.summary-card h3{font-size:11px;color:#ff9900;text-transform:uppercase;letter-spacing:.5px;margin:0}.summary-kpi{display:flex;gap:12px;flex-wrap:wrap}.summary-kpi-item{display:flex;flex-direction:column;align-items:center;min-width:60px}.summary-kpi-val{font-size:24px;font-weight:bold;font-family:'Amazon Ember',monospace;line-height:1.1}.summary-kpi-label{font-size:9px;color:#5a6a7a;text-transform:uppercase}.summary-bar{height:6px;border-radius:3px;background:#2a3a4a;overflow:hidden;width:100%}.summary-bar-fill{height:100%;border-radius:3px}.summary-table{width:100%;border-collapse:collapse;font-size:11px}.summary-table th{text-align:left;font-size:9px;color:#5a6a7a;text-transform:uppercase;padding:4px 8px;border-bottom:1px solid #2a3a4a}.summary-table td{padding:4px 8px;border-bottom:1px solid rgba(255,255,255,.03)}.summary-table .val{font-family:monospace;font-weight:bold;text-align:center}.summary-footer{padding:8px 20px;border-top:1px solid #2a3a4a;display:flex;justify-content:space-between;align-items:center;background:#0d1b2a}
@@ -2921,42 +2943,42 @@ select.tsel{background:#37475a;color:#e0e0e0;border:1px solid #4a5a6a;padding:4p
 
         `);
 
-        document.body.innerHTML = `<div id="app"><div class="hdr"><h1>ðŸš¢ Ship Map â€” <input id="node-input" value="${CONFIG.warehouseId}" readonly maxlength="6" spellcheck="false"></h1><div style="display:flex;align-items:center;gap:12px"><button class="btn" id="b-maps" style="background:#0d47a1;border-color:#42a5f5;color:#42a5f5">ðŸ—ºï¸ Maps</button>
-<button class="btn" id="b-dashboard">ðŸ“º Dashboard</button><button class="btn" id="b-summary" style="background:#0d47a1;border-color:#4fc3f7;color:#4fc3f7">ðŸ“Š Summary</button><button class="btn" id="b-trend">ðŸ“ˆ Trend</button><button class="btn" id="b-handover" style="background:#1b5e20;border-color:#4caf50;color:#69f0ae">ðŸ“‹ Handover</button><button class="btn" id="b-debug" title="Debug">\uD83D\uDC1B Debug</button>
+        document.body.innerHTML = `<div id="app"><div class="hdr"><h1>🚢 Ship Map — <input id="node-input" value="${CONFIG.warehouseId}" readonly maxlength="6" spellcheck="false"></h1><div style="display:flex;align-items:center;gap:12px"><button class="btn" id="b-maps" style="background:#0d47a1;border-color:#42a5f5;color:#42a5f5">🗺️ Maps</button>
+<button class="btn" id="b-dashboard">📺 Dashboard</button><button class="btn" id="b-summary" style="background:#0d47a1;border-color:#4fc3f7;color:#4fc3f7">📊 Summary</button><button class="btn" id="b-trend">📈 Trend</button><button class="btn" id="b-handover" style="background:#1b5e20;border-color:#4caf50;color:#69f0ae">📋 Handover</button><button class="btn" id="b-debug" title="Debug">\uD83D\uDC1B Debug</button>
 
-<button class="btn" id="b-exp">ðŸ“¤ Export</button><button class="btn" id="b-imp">ðŸ“¥ Import</button><button class="btn green" id="b-merge">ðŸ“¥+ Merge</button><button class="btn del" id="b-clr">ðŸ§¹ Clear</button><div class="edit-toggle locked" id="edit-toggle"><span class="lock-icon">ðŸ”’</span><div class="switch"></div><span class="lock-label">LOCKED</span></div></div></div>
+<button class="btn" id="b-exp">📤 Export</button><button class="btn" id="b-imp">📥 Import</button><button class="btn green" id="b-merge">📥+ Merge</button><button class="btn del" id="b-clr">🧹 Clear</button><div class="edit-toggle locked" id="edit-toggle"><span class="lock-icon">🔒</span><div class="switch"></div><span class="lock-label">LOCKED</span></div></div></div>
 
-<div class="tb locked" id="toolbar"><div class="tb-edit-group"><button class="btn on" data-m="select">ðŸ–±ï¸</button><button class="btn" data-m="add">âž•</button><button class="btn del" data-m="delete">ðŸ—‘ï¸</button><div class="sep"></div><label style="font-size:11px;color:#8899aa">Type:</label><select class="tsel" id="sel-type"></select><div class="sep"></div><button class="btn" id="b-zi">ðŸ”+</button><button class="btn" id="b-zo">ðŸ”âˆ’</button><button class="btn" id="b-rv">â†»</button><div class="sep"></div><label style="font-size:11px;color:#8899aa"><input type="checkbox" id="chk-snap" checked> Snap</label></div><button class="btn" id="b-minimap">ðŸ—ºï¸</button><div class="map-search-inline"><span style="font-size:12px">ðŸ”</span><input class="map-search-input" id="map-search-input" placeholder="Search map..." spellcheck="false"><span class="map-search-count" id="map-search-count"></span><button class="map-search-clear" id="map-search-clear">âœ•</button></div></div>
+<div class="tb locked" id="toolbar"><div class="tb-edit-group"><button class="btn on" data-m="select">🖱️</button><button class="btn" data-m="add">➕</button><button class="btn del" data-m="delete">🗑️</button><div class="sep"></div><label style="font-size:11px;color:#8899aa">Type:</label><select class="tsel" id="sel-type"></select><div class="sep"></div><button class="btn" id="b-zi">🔍+</button><button class="btn" id="b-zo">🔍−</button><button class="btn" id="b-rv">↻</button><div class="sep"></div><label style="font-size:11px;color:#8899aa"><input type="checkbox" id="chk-snap" checked> Snap</label></div><button class="btn" id="b-minimap">🗺️</button><div class="map-search-inline"><span style="font-size:12px">🔍</span><input class="map-search-input" id="map-search-input" placeholder="Search map..." spellcheck="false"><span class="map-search-count" id="map-search-count"></span><button class="map-search-clear" id="map-search-clear">✕</button></div></div>
 <div class="main"><div class="cvs" id="cvs"></div>
 <div class="dash-kpi-bar" id="dash-kpi-bar"></div>
-<div class="dash-fab-group"><div class="dash-fab" id="dash-refresh">ðŸ”„</div><div class="dash-fab" id="dash-summary-fab">ðŸ“Š</div><div class="dash-fab" id="dash-zoom-fit">ðŸ”²</div></div>
-<button class="sb-toggle-btn" id="sb-toggle">â—€</button>
-<div class="drawer-wrap" id="drawer-wrap"><div class="drawer"><div class="drawer-hdr"><h3>ðŸ“¦ Containers</h3><div style="display:flex;gap:4px"><button class="btn sm" id="drawer-print" title="Print">\uD83D\uDDA8</button><button class="drawer-close" id="drawer-close">âœ•</button></div></div>
+<div class="dash-fab-group"><div class="dash-fab" id="dash-refresh">🔄</div><div class="dash-fab" id="dash-summary-fab">📊</div><div class="dash-fab" id="dash-zoom-fit">🔲</div></div>
+<button class="sb-toggle-btn" id="sb-toggle">◀</button>
+<div class="drawer-wrap" id="drawer-wrap"><div class="drawer"><div class="drawer-hdr"><h3>📦 Containers</h3><div style="display:flex;gap:4px"><button class="btn sm" id="drawer-print" title="Print">\uD83D\uDDA8</button><button class="drawer-close" id="drawer-close">✕</button></div></div>
 
-<div class="drawer-route" id="drawer-route"></div><div class="drawer-summary" id="drawer-summary"></div><div class="drawer-sort" id="drawer-sort"></div><div class="route-filter-wrap"><span style="font-size:11px;color:#5a6a7a">ðŸ”</span><input class="route-filter" id="drawer-search" placeholder="Search locations..." spellcheck="false"><button class="route-filter-clear" id="drawer-search-clear">âœ•</button></div><div class="drawer-body" id="drawer-body"></div></div></div>
+<div class="drawer-route" id="drawer-route"></div><div class="drawer-summary" id="drawer-summary"></div><div class="drawer-sort" id="drawer-sort"></div><div class="route-filter-wrap"><span style="font-size:11px;color:#5a6a7a">🔍</span><input class="route-filter" id="drawer-search" placeholder="Search locations..." spellcheck="false"><button class="route-filter-clear" id="drawer-search-clear">✕</button></div><div class="drawer-body" id="drawer-body"></div></div></div>
 <div class="sb"><div class="sb-resize-handle" id="sb-resize"></div><div class="dp" id="dp">
-<div class="dp-tabs"><div class="dp-tab active" data-tab="loads">ðŸ“¡ Loads</div><div class="dp-tab" data-tab="yms">ðŸ—ï¸ YMS</div><div class="dp-tab" data-tab="vista">ðŸ“¦ Vista</div><div class="dp-tab" data-tab="fmc">ðŸš› FMC</div></div>
+<div class="dp-tabs"><div class="dp-tab active" data-tab="loads">📡 Loads</div><div class="dp-tab" data-tab="yms">🏗️ YMS</div><div class="dp-tab" data-tab="vista">📦 Vista</div><div class="dp-tab" data-tab="fmc">🚛 FMC</div></div>
 <div id="tab-loads">
-    <div class="dp-hdr"><h3 id="dp-meta">Click ðŸ”„</h3><div style="display:flex;gap:4px"><button class="btn sm" id="b-settings">âš™ï¸</button><button class="btn sm" id="b-refresh">ðŸ”„</button></div></div>
+    <div class="dp-hdr"><h3 id="dp-meta">Click 🔄</h3><div style="display:flex;gap:4px"><button class="btn sm" id="b-settings">⚙️</button><button class="btn sm" id="b-refresh">🔄</button></div></div>
     <div class="loads-sub-tabs" id="loads-sub-tabs">
-        <div class="dp-tab active" data-ltab="ob">ðŸ“¤ OB <span class="loads-sub-count" id="lsc-ob">0</span></div>
-        <div class="dp-tab" data-ltab="noninv">ðŸ”€ NonInv <span class="loads-sub-count" id="lsc-noninv">0</span></div>
-        <div class="dp-tab" data-ltab="ib">ðŸ“¥ IB <span class="loads-sub-count" id="lsc-ib">0</span></div>
+        <div class="dp-tab active" data-ltab="ob">📤 OB <span class="loads-sub-count" id="lsc-ob">0</span></div>
+        <div class="dp-tab" data-ltab="noninv">🔀 NonInv <span class="loads-sub-count" id="lsc-noninv">0</span></div>
+        <div class="dp-tab" data-ltab="ib">📥 IB <span class="loads-sub-count" id="lsc-ib">0</span></div>
 </div>
 <div class="focus-bar" id="focus-bar"></div>
 <div id="loads-ob-filters" class="load-filters-bar">
-        <label class="load-filter-toggle"><input type="checkbox" id="chk-hide-old" checked>â° Hide old DEP 1h+</label>
+        <label class="load-filter-toggle"><input type="checkbox" id="chk-hide-old" checked>⏰ Hide old DEP 1h+</label>
         <span class="load-filter-counts" id="load-filter-counts"></span>
     </div>
     <div id="settings-wrap"></div>
-    <div class="route-filter-wrap"><span style="font-size:11px;color:#5a6a7a">ðŸ”</span><input class="route-filter" id="route-filter" placeholder="Filter..." spellcheck="false"><button class="route-filter-clear" id="route-filter-clear">âœ•</button></div>
+    <div class="route-filter-wrap"><span style="font-size:11px;color:#5a6a7a">🔍</span><input class="route-filter" id="route-filter" placeholder="Filter..." spellcheck="false"><button class="route-filter-clear" id="route-filter-clear">✕</button></div>
     <div class="dp-list" id="dp-list"><div class="dp-empty">No data</div></div>
 </div>
-<div id="tab-yms" class="collapsed"><div class="dp-hdr"><h3 id="yms-meta">YMS</h3><div style="display:flex;gap:4px"><button class="btn sm cyan" id="b-yms-token">ðŸ”‘</button><button class="btn sm" id="b-yms-refresh">ðŸ”„</button></div></div><div id="yms-token-bar" class="collapsed" style="padding:4px 10px;border-bottom:1px solid #1a2a3a;background:rgba(0,0,0,.2)"><div style="display:flex;gap:4px"><input id="yms-token-input" style="flex:1;background:#0d1b2a;color:#69f0ae;border:1px solid #2a3a4a;padding:4px 8px;border-radius:4px;font-size:10px;font-family:monospace" placeholder="eyJhbGci..." spellcheck="false"><button class="btn sm green" id="b-yms-token-apply">âœ“</button></div></div><div class="dp-list" id="yms-report-list"><div class="dp-empty">ðŸ”‘ Paste YMS token to start</div></div></div>
-<div id="tab-vista" class="collapsed"><div class="dp-hdr"><h3 id="vista-meta">Vista</h3><div style="display:flex;gap:4px;align-items:center"><label style="font-size:9px;color:#5a6a7a;display:flex;align-items:center;gap:3px"><input type="checkbox" id="vista-toggle" checked style="accent-color:#ff9900"> Overlay</label><button class="btn sm" id="b-vista-refresh">ðŸ”„</button></div></div><div style="display:flex;border-bottom:1px solid #1a2a3a"><div class="dp-tab active" data-vtab="locations" style="flex:1;padding:4px 8px;font-size:10px">ðŸ“ Locations</div><div class="dp-tab" data-vtab="routes" style="flex:1;padding:4px 8px;font-size:10px">ðŸš› Routes</div></div><div class="route-filter-wrap" style="border-bottom:1px solid #1a2a3a"><span style="font-size:11px;color:#5a6a7a">ðŸ”</span><input class="route-filter" id="vista-search" placeholder="Search locations / routes..." spellcheck="false"><button class="route-filter-clear" id="vista-search-clear">âœ•</button></div><div class="dp-list" id="vista-list"><div class="dp-empty">Click ðŸ”„</div></div><div class="dp-list" id="vista-routes-list" style="display:none"><div class="dp-empty">Click ðŸ”„</div></div></div>
-<div id="tab-fmc" class="collapsed"><div class="dp-hdr"><h3 id="fmc-meta">FMC</h3><button class="btn sm" id="b-fmc-refresh">ðŸ”„</button></div><div class="dp-list" id="fmc-list"><div class="dp-empty">ðŸš› FMC loading...</div></div></div>
+<div id="tab-yms" class="collapsed"><div class="dp-hdr"><h3 id="yms-meta">YMS</h3><div style="display:flex;gap:4px"><button class="btn sm cyan" id="b-yms-token">🔑</button><button class="btn sm" id="b-yms-refresh">🔄</button></div></div><div id="yms-token-bar" class="collapsed" style="padding:4px 10px;border-bottom:1px solid #1a2a3a;background:rgba(0,0,0,.2)"><div style="display:flex;gap:4px"><input id="yms-token-input" style="flex:1;background:#0d1b2a;color:#69f0ae;border:1px solid #2a3a4a;padding:4px 8px;border-radius:4px;font-size:10px;font-family:monospace" placeholder="eyJhbGci..." spellcheck="false"><button class="btn sm green" id="b-yms-token-apply">✓</button></div></div><div class="dp-list" id="yms-report-list"><div class="dp-empty">🔑 Paste YMS token to start</div></div></div>
+<div id="tab-vista" class="collapsed"><div class="dp-hdr"><h3 id="vista-meta">Vista</h3><div style="display:flex;gap:4px;align-items:center"><label style="font-size:9px;color:#5a6a7a;display:flex;align-items:center;gap:3px"><input type="checkbox" id="vista-toggle" checked style="accent-color:#ff9900"> Overlay</label><button class="btn sm" id="b-vista-refresh">🔄</button></div></div><div style="display:flex;border-bottom:1px solid #1a2a3a"><div class="dp-tab active" data-vtab="locations" style="flex:1;padding:4px 8px;font-size:10px">📍 Locations</div><div class="dp-tab" data-vtab="routes" style="flex:1;padding:4px 8px;font-size:10px">🚛 Routes</div></div><div class="route-filter-wrap" style="border-bottom:1px solid #1a2a3a"><span style="font-size:11px;color:#5a6a7a">🔍</span><input class="route-filter" id="vista-search" placeholder="Search locations / routes..." spellcheck="false"><button class="route-filter-clear" id="vista-search-clear">✕</button></div><div class="dp-list" id="vista-list"><div class="dp-empty">Click 🔄</div></div><div class="dp-list" id="vista-routes-list" style="display:none"><div class="dp-empty">Click 🔄</div></div></div>
+<div id="tab-fmc" class="collapsed"><div class="dp-hdr"><h3 id="fmc-meta">FMC</h3><button class="btn sm" id="b-fmc-refresh">🔄</button></div><div class="dp-list" id="fmc-list"><div class="dp-empty">🚛 FMC loading...</div></div></div>
 </div>
-<div class="sb-scroll"><div class="sbs" id="legend-section"><h3 class="section-toggle" id="legend-toggle"><span><span class="collapse-icon" id="legend-chevron">â–¼</span>Legend</span><button class="btn sm" id="b-type-edit" style="display:none">âœï¸</button></h3><div id="legend-body"><div id="legend"></div><div id="type-editor-wrap"></div></div></div><div class="sbs"><h3>Inspector</h3><div id="insp"><div class="ie">Select element(s)...</div></div></div><div class="sbs" style="flex-shrink:0"><h3 class="section-toggle" id="elements-toggle"><span><span class="collapse-icon" id="elements-chevron">â–¼</span>Elements (<span id="elcnt">0</span>)</span><button class="btn sm del" id="b-del-selected" style="display:none">ðŸ—‘ï¸</button></h3></div><div id="elist-body"><div class="elist" id="elist"></div></div><div class="keys"><kbd>S</kbd>Sel <kbd>A</kbd>Add <kbd>D</kbd>Del <kbd>Ctrl+G</kbd>GoTo <kbd>Alt+Drag</kbd>Pan</div>
+<div class="sb-scroll"><div class="sbs" id="legend-section"><h3 class="section-toggle" id="legend-toggle"><span><span class="collapse-icon" id="legend-chevron">▼</span>Legend</span><button class="btn sm" id="b-type-edit" style="display:none">✏️</button></h3><div id="legend-body"><div id="legend"></div><div id="type-editor-wrap"></div></div></div><div class="sbs"><h3>Inspector</h3><div id="insp"><div class="ie">Select element(s)...</div></div></div><div class="sbs" style="flex-shrink:0"><h3 class="section-toggle" id="elements-toggle"><span><span class="collapse-icon" id="elements-chevron">▼</span>Elements (<span id="elcnt">0</span>)</span><button class="btn sm del" id="b-del-selected" style="display:none">🗑️</button></h3></div><div id="elist-body"><div class="elist" id="elist"></div></div><div class="keys"><kbd>S</kbd>Sel <kbd>A</kbd>Add <kbd>D</kbd>Del <kbd>Ctrl+G</kbd>GoTo <kbd>Alt+Drag</kbd>Pan</div>
 </div></div></div>
 <div class="sbar"><span id="status">Ready</span><span id="coords">x:0 y:0</span></div></div>`;
 
@@ -2970,8 +2992,8 @@ select.tsel{background:#37475a;color:#e0e0e0;border:1px solid #4a5a6a;padding:4p
         this._initDrawerSearch();
     },
 
-    _initFavicon() { const link = document.querySelector("link[rel*='icon']") || document.createElement('link'); link.type='image/svg+xml'; link.rel='icon'; link.href='data:image/svg+xml,<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100"><text y=".9em" font-size="90">ðŸš¢</text></svg>'; document.head.appendChild(link); document.title = `Ship Map â€” ${CONFIG.warehouseId}`; },
-    _initNodeInput() { const inp=document.getElementById('node-input'); inp.addEventListener('change',()=>{const val=inp.value.trim().toUpperCase();if(!val){inp.value=CONFIG.warehouseId;return;}CONFIG.warehouseId=val;GM_setValue(CONFIG.storage.nodeIdKey,val);inp.value=val;document.title=`Ship Map â€” ${val}`;State.sspLoads=[];State.clearHighlight();this.closeDrawer();this.updateDataPanel();SSP.startAutoRefresh();if(YMS._token)YMS.startAutoRefresh();VISTA.startAutoRefresh();}); inp.addEventListener('keydown',(e)=>{if(e.key==='Enter')inp.blur();e.stopPropagation();}); },
+    _initFavicon() { const link = document.querySelector("link[rel*='icon']") || document.createElement('link'); link.type='image/svg+xml'; link.rel='icon'; link.href='data:image/svg+xml,<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100"><text y=".9em" font-size="90">🚢</text></svg>'; document.head.appendChild(link); document.title = `Ship Map — ${CONFIG.warehouseId}`; },
+    _initNodeInput() { const inp=document.getElementById('node-input'); inp.addEventListener('change',()=>{const val=inp.value.trim().toUpperCase();if(!val){inp.value=CONFIG.warehouseId;return;}CONFIG.warehouseId=val;GM_setValue(CONFIG.storage.nodeIdKey,val);inp.value=val;document.title=`Ship Map — ${val}`;State.sspLoads=[];State.clearHighlight();this.closeDrawer();this.updateDataPanel();SSP.startAutoRefresh();if(YMS._token)YMS.startAutoRefresh();VISTA.startAutoRefresh();}); inp.addEventListener('keydown',(e)=>{if(e.key==='Enter')inp.blur();e.stopPropagation();}); },
     _initLegend() { document.getElementById('legend').innerHTML = Object.entries(ELEMENT_TYPES).map(([k, t]) => `<div class="leg"><div class="lsw" style="background:${t.color}"></div><span>${t.label}</span></div>`).join(''); },
     _initCollapsible() {
         const setup = (tid, cid, bid, sk, stk) => {
@@ -2981,7 +3003,7 @@ select.tsel{background:#37475a;color:#e0e0e0;border:1px solid #4a5a6a;padding:4p
             if (!t || !ch || !b) return;
             if (State[sk]) {
                 b.style.display = 'none';
-                ch.textContent = 'â–¶';
+                ch.textContent = '▶';
             }
             t.style.cursor = 'pointer';
             t.style.userSelect = 'none';
@@ -2989,7 +3011,7 @@ select.tsel{background:#37475a;color:#e0e0e0;border:1px solid #4a5a6a;padding:4p
                 if (e.target.closest('button')) return;
                 State[sk] = !State[sk];
                 b.style.display = State[sk] ? 'none' : '';
-                ch.textContent = State[sk] ? 'â–¶' : 'â–¼';
+                ch.textContent = State[sk] ? '▶' : '▼';
                 GM_setValue(stk, State[sk]);
             });
         };
@@ -3015,7 +3037,7 @@ select.tsel{background:#37475a;color:#e0e0e0;border:1px solid #4a5a6a;padding:4p
     _initRouteFilter() { const inp=document.getElementById('route-filter'),clear=document.getElementById('route-filter-clear'); let db=null; inp.addEventListener('input',()=>{clearTimeout(db);db=setTimeout(()=>{State.routeFilter=inp.value.trim().toUpperCase();this.updateDataPanel();},150);}); inp.addEventListener('keydown',(e)=>{e.stopPropagation();if(e.key==='Escape'){inp.value='';State.routeFilter='';this.updateDataPanel();inp.blur();}}); clear.onclick=()=>{inp.value='';State.routeFilter='';this.updateDataPanel();}; },
     _initType() { const s=document.getElementById('sel-type'),prev=s.value; s.innerHTML=Object.entries(ELEMENT_TYPES).map(([k,t])=>`<option value="${k}" ${k===State.selectedType?'selected':''}>${t.label}</option>`).join(''); if(ELEMENT_TYPES[prev])s.value=prev; s.onchange=e=>{State.selectedType=e.target.value;}; },
     _initEditToggle() { document.getElementById('edit-toggle').onclick=()=>{State.editMode=!State.editMode;State.saveEditMode();this._updateEditMode();R.render();}; this._updateEditMode(); },
-    _updateEditMode() { const t=document.getElementById('edit-toggle'),tb=document.getElementById('toolbar'),ni=document.getElementById('node-input'),te=document.getElementById('b-type-edit'); if(State.editMode){t.className='edit-toggle unlocked';t.querySelector('.lock-icon').textContent='ðŸ”“';t.querySelector('.lock-label').textContent='EDIT';tb.classList.remove('locked');ni.removeAttribute('readonly');te.style.display='inline-block';}else{t.className='edit-toggle locked';t.querySelector('.lock-icon').textContent='ðŸ”’';t.querySelector('.lock-label').textContent='LOCKED';tb.classList.add('locked');ni.setAttribute('readonly',true);te.style.display='none';State.bgEditMode=false;State.mode=MODE.SELECT;this.updateToolbar();} },
+    _updateEditMode() { const t=document.getElementById('edit-toggle'),tb=document.getElementById('toolbar'),ni=document.getElementById('node-input'),te=document.getElementById('b-type-edit'); if(State.editMode){t.className='edit-toggle unlocked';t.querySelector('.lock-icon').textContent='🔓';t.querySelector('.lock-label').textContent='EDIT';tb.classList.remove('locked');ni.removeAttribute('readonly');te.style.display='inline-block';}else{t.className='edit-toggle locked';t.querySelector('.lock-icon').textContent='🔒';t.querySelector('.lock-label').textContent='LOCKED';tb.classList.add('locked');ni.setAttribute('readonly',true);te.style.display='none';State.bgEditMode=false;State.mode=MODE.SELECT;this.updateToolbar();} },
     updateToolbar() { document.querySelectorAll('[data-m]').forEach(b=>b.classList.toggle('on',b.dataset.m===State.mode)); },
     setStatus(m) { const e=document.getElementById('status'); if(e)e.textContent=m; },
     setCoords(x,y) { const e=document.getElementById('coords'); if(e)e.textContent=`x:${x} y:${y} | ${Math.round(State.scale*100)}%`; },
@@ -3090,18 +3112,18 @@ select.tsel{background:#37475a;color:#e0e0e0;border:1px solid #4a5a6a;padding:4p
                 `<span class="focus-chip" style="background:${st.color}18;border:1px solid ${st.color}55;color:${st.color}" data-focus-route="${gKey}">`
                 + `<span class="fc-dot" style="background:${st.color}"></span>`
                 + `${gKey}`
-                + `<span class="fc-cnt">Ã—${st.count}</span>`
-                + `<span class="fc-close" data-focus-remove="${gKey}">âœ•</span>`
+                + `<span class="fc-cnt">×${st.count}</span>`
+                + `<span class="fc-close" data-focus-remove="${gKey}">✕</span>`
                 + `</span>`
             );
         }
 
         const totalCnt = Object.values(routeStats).reduce((s, r) => s + r.count, 0);
 
-        bar.innerHTML = `<span class="focus-label">ðŸŽ¯ FOCUS</span>`
+        bar.innerHTML = `<span class="focus-label">🎯 FOCUS</span>`
             + chips.join('')
             + `<span style="font-size:9px;color:#5a6a7a;margin-left:auto">${totalCnt} cnt</span>`
-            + `<button class="focus-clear" id="focus-clear-all">âœ• Clear</button>`;
+            + `<button class="focus-clear" id="focus-clear-all">✕ Clear</button>`;
 
         // Bind chip remove
         bar.querySelectorAll('[data-focus-remove]').forEach(btn => {
@@ -3176,17 +3198,17 @@ select.tsel{background:#37475a;color:#e0e0e0;border:1px solid #4a5a6a;padding:4p
         if (CONFIG.data.stemEnabled) setTimeout(() => STEM.startAutoRefresh(), 5000);
         Lifecycle.register('ui-panel-refresh', () => { if (State.sspLoads.length) this.updateDataPanel(); }, CONFIG.data.uiRefreshInterval);
         Trend.start();
-    },  // â† ZAMKNIÄ˜CIE _initDataPanel â€” PRZECINEK
+    },  // ← ZAMKNIÄ˜CIE _initDataPanel — PRZECINEK
 
-    // â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
+    // ═══════════════════════════════════════════════════
     //  DM APPOINTMENT RENDERER
-    // â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
+    // ═══════════════════════════════════════════════════
     _renderYmsOrphanItem(yo) {
         var dwellStr = yo.arrivalEpoch ? dwellFromEpoch(yo.arrivalEpoch) : '';
         var dwMin = yo.arrivalEpoch ? Math.round((Date.now() / 1000 - yo.arrivalEpoch) / 60) : 0;
         var dwColor = dwMin > 1440 ? '#ff1744' : (dwMin > 480 ? '#ff5252' : (dwMin > 120 ? '#ff9100' : '#ffd600'));
 
-        var eqShort = equipTypeShort(yo.equipType);
+        var eqShort = equipTypeShort(yo.equipType, yo.vrId);
         var eqColor = equipTypeColor(yo.equipType);
 
         var statusColor = yo.status === 'FULL' ? '#ffd600' : (yo.status === 'IN_PROGRESS' ? '#69f0ae' : '#4fc3f7');
@@ -3210,10 +3232,10 @@ select.tsel{background:#37475a;color:#e0e0e0;border:1px solid #4a5a6a;padding:4p
         if (routeStr) detailRows += '<div class="fmc-tour-detail-row"><span class="fmc-tour-detail-label">Route</span><span class="fmc-tour-detail-val">' + routeStr + '</span></div>';
         if (yo.annotation) detailRows += '<div class="fmc-tour-detail-row"><span class="fmc-tour-detail-label">Note</span><span class="fmc-tour-detail-val" style="color:#78909C">' + yo.annotation + '</span></div>';
         if (dwellStr) detailRows += '<div class="fmc-tour-detail-row"><span class="fmc-tour-detail-label">On yard</span><span class="fmc-tour-detail-val" style="color:' + dwColor + ';font-weight:bold">' + dwellStr + '</span></div>';
-        detailRows += '<div class="fmc-tour-detail-row"><span class="fmc-tour-detail-label">Source</span><span class="fmc-tour-detail-val" style="color:#ff1744">\u26A0 Not in FMC â€” YMS only</span></div>';
+        detailRows += '<div class="fmc-tour-detail-row"><span class="fmc-tour-detail-label">Source</span><span class="fmc-tour-detail-val" style="color:#ff1744">\u26A0 Not in FMC — YMS only</span></div>';
 
-        var displayName = yo.shipperLabel.replace(/Transfers/g, '').replace(/Empty/g, 'âˆ…');
-        if (cartCount) displayName += ' Â· ' + cartCount;
+        var displayName = yo.shipperLabel.replace(/Transfers/g, '').replace(/Empty/g, '∅');
+        if (cartCount) displayName += ' · ' + cartCount;
 
         return '<div class="fmc-tour-item yms-orphan-item" data-orphan-loc="' + yo.locationCode + '" data-orphan-vrid="' + (yo.vrId || '') + '" style="border-left:3px solid #ff1744">'
             + '<div class="fmc-tour-header">'
@@ -3230,7 +3252,7 @@ select.tsel{background:#37475a;color:#e0e0e0;border:1px solid #4a5a6a;padding:4p
 
     _renderDmAppointment(apt) {
         const fmtDt = (epoch) => {
-            if (!epoch) return 'â€”';
+            if (!epoch) return '—';
             const d = new Date(epoch);
             return String(d.getDate()).padStart(2,'0') + '/' + String(d.getMonth()+1).padStart(2,'0') + ' ' + String(d.getHours()).padStart(2,'0') + ':' + String(d.getMinutes()).padStart(2,'0');
         };
@@ -3240,7 +3262,7 @@ select.tsel{background:#37475a;color:#e0e0e0;border:1px solid #4a5a6a;padding:4p
 
         var sc = SC[apt.status] || '#5a6a7a';
         var ss = SS[apt.status] || (apt.status ? apt.status.substring(0, 5) : '?');
-        var displayName = apt.trailerNumber || apt.carrierName || apt.appointmentId || 'â€”';
+        var displayName = apt.trailerNumber || apt.carrierName || apt.appointmentId || '—';
         var schedTime = fmtDt(apt.schedStart);
         var carrierText = apt.carrierName || '';
         var loadTypeText = apt.carrierLoadType || '';
@@ -3271,7 +3293,7 @@ select.tsel{background:#37475a;color:#e0e0e0;border:1px solid #4a5a6a;padding:4p
 
         // Detail rows
         var detailRows = '';
-        detailRows += '<div class="fmc-tour-detail-row"><span class="fmc-tour-detail-label">Trailer</span><span class="fmc-tour-detail-val" style="color:#4fc3f7">' + (apt.trailerNumber || 'â€”') + '</span></div>';
+        detailRows += '<div class="fmc-tour-detail-row"><span class="fmc-tour-detail-label">Trailer</span><span class="fmc-tour-detail-val" style="color:#4fc3f7">' + (apt.trailerNumber || '—') + '</span></div>';
         detailRows += '<div class="fmc-tour-detail-row"><span class="fmc-tour-detail-label">Carrier</span><span class="fmc-tour-detail-val">' + carrierText + '</span></div>';
         detailRows += '<div class="fmc-tour-detail-row"><span class="fmc-tour-detail-label">Type</span><span class="fmc-tour-detail-val">' + (apt.appointmentType || '') + ' / ' + loadTypeText + '</span></div>';
         detailRows += '<div class="fmc-tour-detail-row"><span class="fmc-tour-detail-label">Sched</span><span class="fmc-tour-detail-val">' + fmtDt(apt.schedStart) + ' \u2192 ' + fmtDt(apt.schedEnd) + '</span></div>';
@@ -3312,9 +3334,76 @@ select.tsel{background:#37475a;color:#e0e0e0;border:1px solid #4a5a6a;padding:4p
     },
 
 
-    // â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
+    // ═══════════════════════════════════════════════════
+    //  UPCOMING RUNS PER ROUTE (SSP → Vista)
+    // ═══════════════════════════════════════════════════
+    _getUpcomingRuns(vistaRouteKey) {
+        if (!State.sspLoads.length) return [];
+        var vk = vistaRouteKey.toUpperCase();
+        var now = Date.now();
+        var matched = [];
+        for (var i = 0; i < State.sspLoads.length; i++) {
+            var ld = State.sspLoads[i];
+            if (ld.status === 'DEPARTED' || ld.status === 'CANCELLED') continue;
+            // Match: routeGroupKey of SSP load matches Vista route key
+            var ldRoutes = ld.route.split(/\s*\+\s*/);
+            var hit = false;
+            for (var ri = 0; ri < ldRoutes.length; ri++) {
+                if (routeGroupKey(ldRoutes[ri]) === vk) { hit = true; break; }
+            }
+            if (!hit) continue;
+            // Parse SDT for sorting
+            var sdtMs = 0;
+            if (ld.sdt && ld.sdt !== '—') { try { sdtMs = new Date(ld.sdt).getTime(); } catch(e) {} }
+            matched.push({ load: ld, sdtMs: sdtMs });
+        }
+        // Sort by SDT ascending (closest first), no-SDT at end
+        matched.sort(function(a, b) {
+            if (!a.sdtMs && !b.sdtMs) return 0;
+            if (!a.sdtMs) return 1;
+            if (!b.sdtMs) return -1;
+            return a.sdtMs - b.sdtMs;
+        });
+        // Return max 5 closest runs
+        return matched.slice(0, 5);
+    },
+
+    _renderRunBadges(vistaRouteKey) {
+        var runs = this._getUpcomingRuns(vistaRouteKey);
+        if (!runs.length) return '';
+        var html = '<div class="vr-runs-row"><span class="vr-runs-label">🚛</span>';
+        for (var i = 0; i < runs.length; i++) {
+            var ld = runs[i].load;
+            var sdtMs = runs[i].sdtMs;
+            var bgColor = SSP._statusColor(ld.status);
+            var eq = equipTypeShort(ld.equipmentType, ld.vrId, ld.subCarrier);
+            var sdtShort = '—';
+            var sdtFull = 'No SDT';
+            if (sdtMs) {
+                var d = new Date(sdtMs);
+                sdtShort = d.getHours().toString().padStart(2,'0') + ':' + d.getMinutes().toString().padStart(2,'0');
+                sdtFull = d.getDate().toString().padStart(2,'0') + '/' + (d.getMonth()+1).toString().padStart(2,'0') + ' ' + sdtShort;
+            }
+            var statusTxt = SSP._statusLabel(ld.status);
+            var door = ld.dockDoor !== '—' ? ld.dockDoor : '';
+            var tipLines = '<b>' + (ld.vrId || '—') + '</b> · ' + statusTxt
+                + '<br>SDT: <b>' + sdtFull + '</b>'
+                + (eq ? '<br>Equip: ' + eq : '')
+                + (door ? '<br>Door: ' + door : '')
+                + (ld.carrier ? '<br>Carrier: ' + ld.carrier : '');
+            html += '<span class="vr-run-badge" style="background:' + bgColor + '22;color:' + bgColor + '">'
+                + '<span class="vr-sdt">' + sdtShort + '</span>'
+                + (eq ? '<span class="vr-eq">' + eq + '</span>' : '')
+                + '<span class="vr-run-tip">' + tipLines + '</span>'
+                + '</span>';
+        }
+        html += '</div>';
+        return html;
+    },
+
+    // ═══════════════════════════════════════════════════
     //  DATA PANEL DISPATCHER
-    // â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
+    // ═══════════════════════════════════════════════════
     _isUpdating: false,
     updateVistaRoutesPanel() {
         var list = document.getElementById('vista-routes-list');
@@ -3367,6 +3456,7 @@ select.tsel{background:#37475a;color:#e0e0e0;border:1px solid #4a5a6a;padding:4p
                 + (g.maxDwell > 0 ? '<span style="font-size:9px;font-family:monospace;color:' + dwC + '">' + g.maxDwell + 'm</span>' : '')
                 + '</div>'
                 + '<div style="display:flex;gap:2px;flex-wrap:wrap;margin:2px 8px;font-size:9px">' + types + '</div>'
+                + this._renderRunBadges(g.key)
                 + '<div style="height:4px;border-radius:2px;background:#2a3a4a;margin:3px 8px;overflow:hidden"><div style="height:100%;width:' + barPct + '%;background:' + congC + ';border-radius:2px"></div></div>'
                 + '<div class="fmc-tour-detail">' + locsHtml + '</div>'
                 + '</div>';
@@ -3390,12 +3480,36 @@ select.tsel{background:#37475a;color:#e0e0e0;border:1px solid #4a5a6a;padding:4p
             });
         });
 
-        // Click location â†’ focus on map
+        // Click location → focus on map
         list.querySelectorAll('[data-vloc]').forEach(function(el) {
             el.addEventListener('click', function(e) {
                 e.stopPropagation();
                 var mapEl = State.elements.find(function(e2) { return matchElement(e2, el.dataset.vloc); });
                 if (mapEl) { State.selectOnly(mapEl); State.focusElement(mapEl); R.render(); UI.refreshList(); UI.showInspector(State.primarySelected, !State.editMode); }
+            });
+        });
+
+        // Tooltip positioning for run badges (fixed position to escape overflow)
+        list.querySelectorAll('.vr-run-badge').forEach(function(badge) {
+            var tip = badge.querySelector('.vr-run-tip');
+            if (!tip) return;
+            badge.addEventListener('mouseenter', function() {
+                var r = badge.getBoundingClientRect();
+                tip.style.display = 'block';
+                // Position above the badge, centered
+                var tipRect = tip.getBoundingClientRect();
+                var left = r.left + r.width / 2 - tipRect.width / 2;
+                var top = r.top - tipRect.height - 6;
+                // If clipped at top, show below instead
+                if (top < 4) top = r.bottom + 6;
+                // Keep within viewport horizontally
+                if (left < 4) left = 4;
+                if (left + tipRect.width > window.innerWidth - 4) left = window.innerWidth - tipRect.width - 4;
+                tip.style.left = left + 'px';
+                tip.style.top = top + 'px';
+            });
+            badge.addEventListener('mouseleave', function() {
+                tip.style.display = 'none';
             });
         });
     },
@@ -3431,28 +3545,28 @@ select.tsel{background:#37475a;color:#e0e0e0;border:1px solid #4a5a6a;padding:4p
     },
 
 
-    // â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
+    // ═══════════════════════════════════════════════════
     //  OB LIST (SSP minus TransferTotes)
-    // â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
+    // ═══════════════════════════════════════════════════
     _renderOBList() {
         const meta = document.getElementById('dp-meta'), list = document.getElementById('dp-list'), filterCounts = document.getElementById('load-filter-counts');
-        if (State.dataLoading) { meta.textContent = 'â³ Loading...'; list.innerHTML = '<div class="dp-empty pulse">Fetching SSP...</div>'; return; }
-        if (State.dataLastUpdated) { const t = State.dataLastUpdated; const fmcTag = FMC.tours.length ? ' Â· FMCâœ…' : ''; meta.textContent = `${State.sspLoads.length} loads Â· ${t.getHours().toString().padStart(2,'0')}:${t.getMinutes().toString().padStart(2,'0')}${fmcTag}`; }
-        if (!State.sspLoads.length) { list.innerHTML = '<div class="dp-empty">No loads â€” click ðŸ”„</div>'; if (filterCounts) filterCounts.textContent = ''; return; }
+        if (State.dataLoading) { meta.textContent = '⏳ Loading...'; list.innerHTML = '<div class="dp-empty pulse">Fetching SSP...</div>'; return; }
+        if (State.dataLastUpdated) { const t = State.dataLastUpdated; const fmcTag = FMC.tours.length ? ' · FMC✅' : ''; meta.textContent = `${State.sspLoads.length} loads · ${t.getHours().toString().padStart(2,'0')}:${t.getMinutes().toString().padStart(2,'0')}${fmcTag}`; }
+        if (!State.sspLoads.length) { list.innerHTML = '<div class="dp-empty">No loads — click 🔄</div>'; if (filterCounts) filterCounts.textContent = ''; return; }
         const rf = State.routeFilter;
         let html = '', oldDepN = 0, ttN = 0;
         for (let i = 0; i < State.sspLoads.length; i++) {
             const l = State.sspLoads[i];
             if (FMC.isTransferTotes(l.vrId)) { ttN++; continue; }
-            if (rf) { const match = l.route.toUpperCase().includes(rf) || l.rawRoute.toUpperCase().includes(rf) || l.carrier.toUpperCase().includes(rf) || (l.dockDoor !== 'â€”' && l.dockDoor.toUpperCase().includes(rf)) || (l.vrId && l.vrId.toUpperCase().includes(rf)); if (!match) continue; }
+            if (rf) { const match = l.route.toUpperCase().includes(rf) || l.rawRoute.toUpperCase().includes(rf) || l.carrier.toUpperCase().includes(rf) || (l.dockDoor !== '—' && l.dockDoor.toUpperCase().includes(rf)) || (l.vrId && l.vrId.toUpperCase().includes(rf)); if (!match) continue; }
             if (State.hideOldDeparted && isOldDeparted(l, State.oldDepartedMinutes)) { oldDepN++; continue; }
             html += this._renderSSPLoadItem(l, i);
         }
-        const parts = []; if (ttN > 0) parts.push(`ðŸ”€${ttN} TT`); if (oldDepN > 0) parts.push(`â°${oldDepN} old`);
-        if (parts.length) html += `<div class="hidden-count">${parts.join(' Â· ')} hidden</div>`;
-        if (filterCounts) filterCounts.textContent = oldDepN > 0 ? `â°${oldDepN}` : '';
+        const parts = []; if (ttN > 0) parts.push(`🔀${ttN} TT`); if (oldDepN > 0) parts.push(`⏰${oldDepN} old`);
+        if (parts.length) html += `<div class="hidden-count">${parts.join(' · ')} hidden</div>`;
+        if (filterCounts) filterCounts.textContent = oldDepN > 0 ? `⏰${oldDepN}` : '';
         list.innerHTML = html || '<div class="dp-empty">No matching OB loads</div>';
-                // â”€â”€ Focus Mode: bind eye buttons â”€â”€
+                // ── Focus Mode: bind eye buttons ──
         list.querySelectorAll('.load-focus-btn').forEach(btn => {
             btn.addEventListener('click', (e) => {
                 e.stopPropagation();  // don't trigger load expand
@@ -3472,43 +3586,43 @@ select.tsel{background:#37475a;color:#e0e0e0;border:1px solid #4a5a6a;padding:4p
 
     _renderSSPLoadItem(l, idx) {
         const isHL = State.highlightedLoadIdx === idx;
-        const sdtShort = l.sdt !== 'â€”' ? (l.sdt.split(' ')[1] || l.sdt) : 'â€”';
+        const sdtShort = l.sdt !== '—' ? (l.sdt.split(' ')[1] || l.sdt) : '—';
         const isSwap = isSwapBody(l.equipmentType);
         const isCptLoad = isCptEqualsSdt(l);
         const cpt = (l.status !== 'DEPARTED' && l.status !== 'CANCELLED') ? cptCountdown(l.cpt) : null;
-        const cptBadge = cpt ? `<span class="cpt-countdown cpt-${cpt.level}">â°${cpt.text}</span>` : '';
-        const eqBadge = l.equipmentType ? `<span class="load-equip-badge" style="background:${equipTypeColor(l.equipmentType)}20;color:${equipTypeColor(l.equipmentType)}">${equipTypeShort(l.equipmentType)}</span>` : '';
+        const cptBadge = cpt ? `<span class="cpt-countdown cpt-${cpt.level}">⏰${cpt.text}</span>` : '';
+        const eqBadge = l.equipmentType ? `<span class="load-equip-badge" style="background:${equipTypeColor(l.equipmentType)}20;color:${equipTypeColor(l.equipmentType)}">${equipTypeShort(l.equipmentType, l.vrId, l.subCarrier)}</span>` : '';
         const vrId2 = l.vrId?.toUpperCase() || '';
         const yiAll = vrId2 ? State.findYmsForVrId(vrId2) : null;
         let yb = '';
-        if (yiAll) { const allAnn = yiAll.every(yi => yi.fromAnnotation); yb = allAnn ? `<span class="load-yms-badge load-yms-annotation">ðŸ“</span>` : `<span class="load-yms-badge load-yms-found">âœ…${yiAll.length > 1 ? yiAll.length : ''}</span>`; }
+        if (yiAll) { const allAnn = yiAll.every(yi => yi.fromAnnotation); yb = allAnn ? `<span class="load-yms-badge load-yms-annotation">📝</span>` : `<span class="load-yms-badge load-yms-found">✅${yiAll.length > 1 ? yiAll.length : ''}</span>`; }
         let ml = '';
-        if (l._containers) { const locs = l._containers.locations.map(lc => lc.label); const mt = locs.filter(ll => State.elements.some(el => matchElement(el, ll))).length; const um = locs.length - mt; ml = `<div class="load-match-info">ðŸ”¦${mt}/${locs.length}${um ? ` âš ï¸${um}` : ''}</div>`; }
+        if (l._containers) { const locs = l._containers.locations.map(lc => lc.label); const mt = locs.filter(ll => State.elements.some(el => matchElement(el, ll))).length; const um = locs.length - mt; ml = `<div class="load-match-info">🔦${mt}/${locs.length}${um ? ` ⚠️${um}` : ''}</div>`; }
         const isFocused = State.isFocusRoute(l.rawRoute);
 const focusColor = isFocused ? State.focusRoutes.get(routeGroupKey(l.rawRoute))?.color || '#ff9900' : '';
-const eyeBtn = `<button class="load-focus-btn ${isFocused ? 'focused' : ''}" data-focus-raw="${l.rawRoute}" title="Toggle focus" style="${isFocused ? 'color:' + focusColor : ''}">ðŸ‘</button>`;
+const eyeBtn = `<button class="load-focus-btn ${isFocused ? 'focused' : ''}" data-focus-raw="${l.rawRoute}" title="Toggle focus" style="${isFocused ? 'color:' + focusColor : ''}">👁</button>`;
 
         return `<div class="load-item ${l._expanded ? 'expanded' : ''} ${isHL ? 'hl-active' : ''}" data-load-idx="${idx}">
 <div class="load-header">
-<span class="load-expand-icon">${l._expanded ? 'â–¼' : 'â–¶'}</span>
+<span class="load-expand-icon">${l._expanded ? '▼' : '▶'}</span>
 <span class="load-route" title="${l.rawRoute}">${l.route}</span>
 ${eqBadge}
 <span class="load-status" style="background:${l.statusColor};color:#000">${l.statusShort}</span>
-${l.dockDoor !== 'â€”' ? `<span class="load-dock">${l.dockDoor}</span>` : ''}
-<span class="load-sdt ${isCptLoad ? 'cpt-load' : ''}">${isCptLoad ? 'â­' : ''}${sdtShort}</span>
+${l.dockDoor !== '—' ? `<span class="load-dock">${l.dockDoor}</span>` : ''}
+<span class="load-sdt ${isCptLoad ? 'cpt-load' : ''}">${isCptLoad ? '⭐' : ''}${sdtShort}</span>
 ${cptBadge}${yb}
-${l._swapCount > 1 ? `<span class="load-swap-badge">ðŸ”€${l._swapCount}</span>` : (isSwap ? '<span class="load-swap-badge">ðŸ”€</span>' : '')}
+${l._swapCount > 1 ? `<span class="load-swap-badge">🔀${l._swapCount}</span>` : (isSwap ? '<span class="load-swap-badge">🔀</span>' : '')}
 ${eyeBtn}
-</div>${ml}${l._containersLoading ? '<div class="cnt-loading pulse">â³</div>' : ''}</div>`;
+</div>${ml}${l._containersLoading ? '<div class="cnt-loading pulse">⏳</div>' : ''}</div>`;
 
     },
 
-    // â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
-    //  NONINV LIST (FMC Transfers â†’ our site)
-    // â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
+    // ═══════════════════════════════════════════════════
+    //  NONINV LIST (FMC Transfers → our site)
+    // ═══════════════════════════════════════════════════
     _renderNonInvList() {
         const meta = document.getElementById('dp-meta'), list = document.getElementById('dp-list');
-        if (FMC.loading && Dockmaster.loading) { meta.textContent = 'â³ Loading...'; list.innerHTML = '<div class="dp-empty pulse">Fetching...</div>'; return; }
+        if (FMC.loading && Dockmaster.loading) { meta.textContent = '⏳ Loading...'; list.innerHTML = '<div class="dp-empty pulse">Fetching...</div>'; return; }
 
         const fmcToursRaw = FMC.getNonInvTours();
         const relatFilteredCount = fmcToursRaw.filter(t => t.vrId && RELAT.isCompleted(t.vrId)).length;
@@ -3528,13 +3642,13 @@ ${eyeBtn}
         var dmTime = Dockmaster.lastUpdated;
 
         meta.textContent = total + ' NonInv'
-            + (fmcTime ? ' Â· FMC:' + String(fmcTime.getHours()).padStart(2,'0') + ':' + String(fmcTime.getMinutes()).padStart(2,'0') : '')
-            + (dmTime ? ' Â· DM:' + String(dmTime.getHours()).padStart(2,'0') + ':' + String(dmTime.getMinutes()).padStart(2,'0') : '')
-            + (RELAT.lastUpdated ? ' Â· RELATâœ…' : '');
+            + (fmcTime ? ' · FMC:' + String(fmcTime.getHours()).padStart(2,'0') + ':' + String(fmcTime.getMinutes()).padStart(2,'0') : '')
+            + (dmTime ? ' · DM:' + String(dmTime.getHours()).padStart(2,'0') + ':' + String(dmTime.getMinutes()).padStart(2,'0') : '')
+            + (RELAT.lastUpdated ? ' · RELAT✅' : '');
 
         if (!total) { list.innerHTML = '<div class="dp-empty">No NonInv data</div>'; return; }
 
-        // â”€â”€ Merge into single sorted list â”€â”€
+        // ── Merge into single sorted list ──
 
         var merged = [];
 
@@ -3582,7 +3696,7 @@ ${eyeBtn}
             return (a.sortTime || Infinity) - (b.sortTime || Infinity);
         });
 
-        // â”€â”€ KPI bar â”€â”€
+        // ── KPI bar ──
 
         var dmActive = filteredDm.filter(function(a) { return a.status === 'ARRIVED' || a.status === 'RECEIVING'; }).length;
         var dmSched = filteredDm.filter(function(a) { return a.status === 'SCHEDULED'; }).length;
@@ -3600,7 +3714,7 @@ ${eyeBtn}
             + (relatFilteredCount ? '<span>\u2705 <strong style="color:#69f0ae">' + relatFilteredCount + '</strong> RELAT done</span>' : '')
             + '</div>';
 
-        // â”€â”€ Render merged list â”€â”€
+        // ── Render merged list ──
         var renderCount = 0;
         for (var mi = 0; mi < merged.length && renderCount < 80; mi++) {
             var item = merged[mi];
@@ -3695,12 +3809,12 @@ ${eyeBtn}
 
 
 
-    // â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
-    //  IB LIST (FMC â€” everything else inbound)
-    // â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
+    // ═══════════════════════════════════════════════════
+    //  IB LIST (FMC — everything else inbound)
+    // ═══════════════════════════════════════════════════
     _renderIBList() {
         const meta = document.getElementById('dp-meta'), list = document.getElementById('dp-list');
-        if (FMC.loading && Dockmaster.loading) { meta.textContent = 'â³ Loading...'; list.innerHTML = '<div class="dp-empty pulse">Fetching...</div>'; return; }
+        if (FMC.loading && Dockmaster.loading) { meta.textContent = '⏳ Loading...'; list.innerHTML = '<div class="dp-empty pulse">Fetching...</div>'; return; }
 
         const fmcTours = FMC.getIBTours();
         const dmIB = Dockmaster.getIB();
@@ -3711,11 +3825,11 @@ ${eyeBtn}
 
         var total = filteredFmc.length + filteredDm.length;
         var fmcTime = FMC.lastUpdated, dmTime = Dockmaster.lastUpdated;
-        meta.textContent = total + ' IB' + (fmcTime ? ' Â· FMC:' + String(fmcTime.getHours()).padStart(2,'0') + ':' + String(fmcTime.getMinutes()).padStart(2,'0') : '') + (dmTime ? ' Â· DM:' + String(dmTime.getHours()).padStart(2,'0') + ':' + String(dmTime.getMinutes()).padStart(2,'0') : '');
+        meta.textContent = total + ' IB' + (fmcTime ? ' · FMC:' + String(fmcTime.getHours()).padStart(2,'0') + ':' + String(fmcTime.getMinutes()).padStart(2,'0') : '') + (dmTime ? ' · DM:' + String(dmTime.getHours()).padStart(2,'0') + ':' + String(dmTime.getMinutes()).padStart(2,'0') : '');
 
         if (!total) { list.innerHTML = '<div class="dp-empty">No IB data</div>'; return; }
 
-        // â”€â”€ Merge into single sorted list â”€â”€
+        // ── Merge into single sorted list ──
         var merged = [];
 
         for (var fi = 0; fi < filteredFmc.length; fi++) {
@@ -3744,7 +3858,7 @@ ${eyeBtn}
             return (a.sortTime || Infinity) - (b.sortTime || Infinity);
         });
 
-        // â”€â”€ KPI bar â”€â”€
+        // ── KPI bar ──
         var dmActive = filteredDm.filter(function(a) { return a.status === 'ARRIVED' || a.status === 'RECEIVING'; }).length;
         var dmSched = filteredDm.filter(function(a) { return a.status === 'SCHEDULED'; }).length;
 
@@ -3755,7 +3869,7 @@ ${eyeBtn}
             + (dmSched ? '<span>\uD83D\uDCC5 <strong style="color:#ffd600">' + dmSched + '</strong> sched</span>' : '')
             + '</div>';
 
-        // â”€â”€ Render merged list â”€â”€
+        // ── Render merged list ──
         var renderCount = 0;
         for (var mi = 0; mi < merged.length && renderCount < 80; mi++) {
             var item = merged[mi];
@@ -3805,13 +3919,13 @@ ${eyeBtn}
         });
     },
 
-    // â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
+    // ═══════════════════════════════════════════════════
     //  SHARED: FMC tour renderer
-    // â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
+    // ═══════════════════════════════════════════════════
     _renderFmcTourItem(tour, showShipper = false) {
-                const fmtTime = (epoch) => { if (!epoch) return 'â€”'; const d = new Date(epoch); return `${d.getHours().toString().padStart(2,'0')}:${d.getMinutes().toString().padStart(2,'0')}`; };
+                const fmtTime = (epoch) => { if (!epoch) return '—'; const d = new Date(epoch); return `${d.getHours().toString().padStart(2,'0')}:${d.getMinutes().toString().padStart(2,'0')}`; };
         const fmtDateTime = (epoch) => {
-            if (!epoch) return 'â€”';
+            if (!epoch) return '—';
             const d = new Date(epoch);
             return `${d.getDate().toString().padStart(2,'0')}/${(d.getMonth()+1).toString().padStart(2,'0')} ${d.getHours().toString().padStart(2,'0')}:${d.getMinutes().toString().padStart(2,'0')}`;
         };
@@ -3820,37 +3934,37 @@ ${eyeBtn}
         const SS = { 'DEPARTED':'DEP', 'AT_YARD':'YRD', 'IN_TRANSIT':'TRN', 'ASSIGNED':'ASG', 'PLANNED':'PLN' };
         const sc = SC[tour.tourStatus] || '#5a6a7a', ss = SS[tour.tourStatus] || tour.tourStatus?.substring(0, 3) || '?';
         const timeLabel = tour.direction === 'IB'
-            ? `ðŸ“¥${fmtDateTime(tour.plannedYardArrival)}`
-            : `ðŸ“¤${fmtDateTime(tour.plannedYardDeparture)}`;
+            ? `📥${fmtDateTime(tour.plannedYardArrival)}`
+            : `📤${fmtDateTime(tour.plannedYardDeparture)}`;
 
         const maxDelay = Math.max(tour.arrivalDelayMin || 0, tour.departureDelayMin || 0);
-        const delayBadge = maxDelay > 15 ? `<span class="fmc-tour-delay">âš +${maxDelay}m</span>` : '';
+        const delayBadge = maxDelay > 15 ? `<span class="fmc-tour-delay">⚠+${maxDelay}m</span>` : '';
         const isAtYard = tour.hasArrived && !tour.hasDeparted;
-        const dwellBadge = isAtYard && tour.yardDwellMin > 0 ? `<span class="fmc-tour-dwell" style="color:${tour.yardDwellMin > 120 ? '#ff5252' : tour.yardDwellMin > 60 ? '#ff9100' : '#69f0ae'}">â±${tour.yardDwellMin}m</span>` : '';
-        const eqBadge = tour.equipmentType ? `<span class="load-equip-badge" style="background:${equipTypeColor(tour.equipmentType)}20;color:${equipTypeColor(tour.equipmentType)}">${equipTypeShort(tour.equipmentType)}</span>` : '';
+        const dwellBadge = isAtYard && tour.yardDwellMin > 0 ? `<span class="fmc-tour-dwell" style="color:${tour.yardDwellMin > 120 ? '#ff5252' : tour.yardDwellMin > 60 ? '#ff9100' : '#69f0ae'}">⏱${tour.yardDwellMin}m</span>` : '';
+        const eqBadge = tour.equipmentType ? `<span class="load-equip-badge" style="background:${equipTypeColor(tour.equipmentType)}20;color:${equipTypeColor(tour.equipmentType)}">${equipTypeShort(tour.equipmentType, tour.vrId, tour.subcarrier)}</span>` : '';
         const vrId = tour.vrId?.toUpperCase() || '';
         const ymsHits = vrId ? State.findYmsForVrId(vrId) : null;
-        const ymsBadge = ymsHits ? `<span class="load-yms-badge load-yms-found">âœ…</span>` : '';
+        const ymsBadge = ymsHits ? `<span class="load-yms-badge load-yms-found">✅</span>` : '';
 
-        // â”€â”€ Display name: shipper for NonInv/IB, route for OB
+        // ── Display name: shipper for NonInv/IB, route for OB
         const displayName = showShipper
-            ? (tour.shippers.join(', ') || tour.businessTypesList.join(', ') || tour.route || 'â€”')
+            ? (tour.shippers.join(', ') || tour.businessTypesList.join(', ') || tour.route || '—')
             : (tour.route || tour.facilitySeq);
 
         const detail = `<div class="fmc-tour-detail">
             ${tour.vrId ? `<div class="fmc-tour-detail-row"><span class="fmc-tour-detail-label">VR ID</span><span class="fmc-tour-detail-val" style="color:#4fc3f7;cursor:pointer" data-copy="${tour.vrId}">${tour.vrId}</span></div>` : ''}
             <div class="fmc-tour-detail-row"><span class="fmc-tour-detail-label">Lane</span><span class="fmc-tour-detail-val">${tour.facilitySeq}</span></div>
             <div class="fmc-tour-detail-row"><span class="fmc-tour-detail-label">Route</span><span class="fmc-tour-detail-val">${tour.route}</span></div>
-            <div class="fmc-tour-detail-row"><span class="fmc-tour-detail-label">Shipper</span><span class="fmc-tour-detail-val">${tour.shippers.join(', ') || 'â€”'}</span></div>
+            <div class="fmc-tour-detail-row"><span class="fmc-tour-detail-label">Shipper</span><span class="fmc-tour-detail-val">${tour.shippers.join(', ') || '—'}</span></div>
             <div class="fmc-tour-detail-row"><span class="fmc-tour-detail-label">Carrier</span><span class="fmc-tour-detail-val">${tour.carrier}</span></div>
             <div class="fmc-tour-detail-row"><span class="fmc-tour-detail-label">Type</span><span class="fmc-tour-detail-val">${tour.businessTypesList.join(', ') || tour.shipperCategory}</span></div>
-            <div class="fmc-tour-detail-row"><span class="fmc-tour-detail-label">Equipment</span><span class="fmc-tour-detail-val">${tour.equipmentType || 'â€”'}</span></div>
+            <div class="fmc-tour-detail-row"><span class="fmc-tour-detail-label">Equipment</span><span class="fmc-tour-detail-val">${tour.equipmentType || '—'}</span></div>
             <div class="fmc-tour-detail-row"><span class="fmc-tour-detail-label">Plan Arr</span><span class="fmc-tour-detail-val">${fmtDateTime(tour.plannedYardArrival)}</span></div>
             <div class="fmc-tour-detail-row"><span class="fmc-tour-detail-label">Plan Dep</span><span class="fmc-tour-detail-val">${fmtDateTime(tour.plannedYardDeparture)}</span></div>
 
             ${ymsHits ? `<div class="fmc-tour-detail-row"><span class="fmc-tour-detail-label">YMS</span><span class="fmc-tour-detail-val" style="color:#69f0ae">${ymsHits.map(h => h.locationCode).join(', ')}</span></div>` : ''}
         </div>`;
-        return `<div class="fmc-tour-item" data-fmc-vrid="${vrId}"><div class="fmc-tour-header"><span class="load-expand-icon">â–¶</span><span class="fmc-tour-route" title="${tour.facilitySeq}">${displayName}</span>${eqBadge}<span class="fmc-tour-status" style="background:${sc};color:#000">${ss}</span><span class="fmc-tour-time">${timeLabel}</span>${delayBadge}${dwellBadge}${ymsBadge}<span class="fmc-tour-carrier">${tour.carrier || ''}</span></div>${detail}</div>`;
+        return `<div class="fmc-tour-item" data-fmc-vrid="${vrId}"><div class="fmc-tour-header"><span class="load-expand-icon">▶</span><span class="fmc-tour-route" title="${tour.facilitySeq}">${displayName}</span>${eqBadge}<span class="fmc-tour-status" style="background:${sc};color:#000">${ss}</span><span class="fmc-tour-time">${timeLabel}</span>${delayBadge}${dwellBadge}${ymsBadge}<span class="fmc-tour-carrier">${tour.carrier || ''}</span></div>${detail}</div>`;
     },
 
 
@@ -3860,14 +3974,14 @@ ${eyeBtn}
             const icon = item.querySelector('.load-expand-icon');
             header?.addEventListener('click', () => {
                 const wasOpen = item.classList.contains('expanded');
-                container.querySelectorAll('.fmc-tour-item.expanded').forEach(other => { if (other !== item) { other.classList.remove('expanded'); const oi = other.querySelector('.load-expand-icon'); if (oi) oi.textContent = 'â–¶'; } });
+                container.querySelectorAll('.fmc-tour-item.expanded').forEach(other => { if (other !== item) { other.classList.remove('expanded'); const oi = other.querySelector('.load-expand-icon'); if (oi) oi.textContent = '▶'; } });
                 item.classList.toggle('expanded', !wasOpen);
-                if (icon) icon.textContent = wasOpen ? 'â–¶' : 'â–¼';
+                if (icon) icon.textContent = wasOpen ? '▶' : '▼';
                 const vrId = item.dataset.fmcVrid;
                 if (!wasOpen && vrId) this._highlightFmcOnMap(vrId);
                 else { State.clearHighlight(); R.render(); }
             });
-            item.querySelectorAll('[data-copy]').forEach(el => { el.addEventListener('click', (e) => { e.stopPropagation(); navigator.clipboard.writeText(el.dataset.copy).then(() => { el.textContent = 'âœ…'; setTimeout(() => { el.textContent = el.dataset.copy; }, 1500); }); }); });
+            item.querySelectorAll('[data-copy]').forEach(el => { el.addEventListener('click', (e) => { e.stopPropagation(); navigator.clipboard.writeText(el.dataset.copy).then(() => { el.textContent = '✅'; setTimeout(() => { el.textContent = el.dataset.copy; }, 1500); }); }); });
         });
     },
 
@@ -3889,24 +4003,24 @@ ${eyeBtn}
         State.highlightData = hd; State.highlightedLoadIdx = -1; State.highlightedVrId = vu; State._startPulse(); R.render();
     },
 
-    // â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
+    // ═══════════════════════════════════════════════════
     //  YMS / VISTA / FMC PANELS
-    // â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
+    // ═══════════════════════════════════════════════════
     updateYmsPanel() {
         const meta = document.getElementById('yms-meta'), list = document.getElementById('yms-report-list');
-        if (State.ymsLoading) { meta.textContent = 'â³ Loading...'; list.innerHTML = '<div class="dp-empty pulse">Fetching...</div>'; return; }
-        if (State.ymsLastUpdated) { const t = State.ymsLastUpdated; meta.textContent = `${State.ymsLocations.length} loc Â· ${t.getHours().toString().padStart(2,'0')}:${t.getMinutes().toString().padStart(2,'0')}`; }
-        if (!State.ymsLocations.length) { list.innerHTML = YMS._token ? '<div class="dp-empty">Click ðŸ”„</div>' : `<div class="dp-empty">ðŸ”‘ Open <a href="https://trans-logistics-eu.amazon.com/yms/shipclerk" target="_blank" style="color:#4fc3f7">YMS tab</a> for ${CONFIG.warehouseId}</div>`; return; }
+        if (State.ymsLoading) { meta.textContent = '⏳ Loading...'; list.innerHTML = '<div class="dp-empty pulse">Fetching...</div>'; return; }
+        if (State.ymsLastUpdated) { const t = State.ymsLastUpdated; meta.textContent = `${State.ymsLocations.length} loc · ${t.getHours().toString().padStart(2,'0')}:${t.getMinutes().toString().padStart(2,'0')}`; }
+        if (!State.ymsLocations.length) { list.innerHTML = YMS._token ? '<div class="dp-empty">Click 🔄</div>' : `<div class="dp-empty">🔑 Open <a href="https://trans-logistics-eu.amazon.com/yms/shipclerk" target="_blank" style="color:#4fc3f7">YMS tab</a> for ${CONFIG.warehouseId}</div>`; return; }
         const report = YMS.buildReport(); let totalAll = 0, totalUnavail = 0, totalEmpty = 0, totalFull = 0, rows = '';
-        for (const [owner, data] of report) { const isPrio = ['ATSEU','ATPST','DHLTS'].includes(owner); totalAll += data.total; totalUnavail += data.unavailable; totalEmpty += data.empty; totalFull += data.full; const tl = Object.entries(data.types).map(([t2,n])=>`${n}${(TRAILER_LABELS[t2]||'').trim()}`).join(' '); rows += `<tr class="${isPrio?'priority-row':''}"><td class="owner-code">${owner}</td><td class="cnt cnt-ok">${data.total}</td><td class="cnt" style="color:#69f0ae">${data.empty||'â€”'}</td><td class="cnt" style="color:#ffd600">${data.full||'â€”'}</td><td class="cnt ${data.unavailable>0?'cnt-warn':''}">${data.unavailable||'â€”'}</td><td style="font-size:10px;color:#78909C">${tl}</td></tr>`; }
+        for (const [owner, data] of report) { const isPrio = ['ATSEU','ATPST','DHLTS'].includes(owner); totalAll += data.total; totalUnavail += data.unavailable; totalEmpty += data.empty; totalFull += data.full; const tl = Object.entries(data.types).map(([t2,n])=>`${n}${(TRAILER_LABELS[t2]||'').trim()}`).join(' '); rows += `<tr class="${isPrio?'priority-row':''}"><td class="owner-code">${owner}</td><td class="cnt cnt-ok">${data.total}</td><td class="cnt" style="color:#69f0ae">${data.empty||'—'}</td><td class="cnt" style="color:#ffd600">${data.full||'—'}</td><td class="cnt ${data.unavailable>0?'cnt-warn':''}">${data.unavailable||'—'}</td><td style="font-size:10px;color:#78909C">${tl}</td></tr>`; }
         rows += `<tr class="total-row"><td>TOTAL</td><td class="cnt">${totalAll}</td><td class="cnt">${totalEmpty}</td><td class="cnt">${totalFull}</td><td class="cnt">${totalUnavail}</td><td></td></tr>`;
-        list.innerHTML = `<div class="yms-report"><table class="yms-rtable"><thead><tr><th>Owner</th><th style="text-align:center">Total</th><th style="text-align:center">âˆ…</th><th style="text-align:center">ðŸ“¦</th><th style="text-align:center">âš ï¸</th><th>Types</th></tr></thead><tbody>${rows}</tbody></table></div>`;
+        list.innerHTML = `<div class="yms-report"><table class="yms-rtable"><thead><tr><th>Owner</th><th style="text-align:center">Total</th><th style="text-align:center">∅</th><th style="text-align:center">📦</th><th style="text-align:center">⚠️</th><th>Types</th></tr></thead><tbody>${rows}</tbody></table></div>`;
     },
     updateVistaPanel() {
         const meta = document.getElementById('vista-meta'), list = document.getElementById('vista-list');
-        if (State.vistaLoading) { meta.textContent = 'â³ Loading...'; list.innerHTML = '<div class="dp-empty pulse">Fetching...</div>'; return; }
-        if (State.vistaLastUpdated) { const t = State.vistaLastUpdated; meta.textContent = `${State.vistaContainers.length} cnt Â· ${t.getHours().toString().padStart(2,'0')}:${t.getMinutes().toString().padStart(2,'0')}`; }
-        if (!State.vistaContainers.length) { list.innerHTML = '<div class="dp-empty">No data â€” click ðŸ”„</div>'; return; }
+        if (State.vistaLoading) { meta.textContent = '⏳ Loading...'; list.innerHTML = '<div class="dp-empty pulse">Fetching...</div>'; return; }
+        if (State.vistaLastUpdated) { const t = State.vistaLastUpdated; meta.textContent = `${State.vistaContainers.length} cnt · ${t.getHours().toString().padStart(2,'0')}:${t.getMinutes().toString().padStart(2,'0')}`; }
+        if (!State.vistaContainers.length) { list.innerHTML = '<div class="dp-empty">No data — click 🔄</div>'; return; }
         const locs = Object.entries(State.vistaLocMap).sort((a, b) => b[1].totalContainers - a[1].totalContainers);
         let html = '<table class="yms-rtable"><thead><tr><th>Location</th><th style="text-align:center">Cnt</th><th style="text-align:center">Pkg</th><th>Dwell</th></tr></thead><tbody>';
         for (const [locName, d] of locs) { const lc = d.totalContainers > 15 ? '#ff1744' : d.totalContainers > 8 ? '#ff9100' : d.totalContainers > 3 ? '#ffd600' : '#69f0ae'; const dwC = d.maxDwell > 120 ? 'color:#ff5252' : d.maxDwell > 60 ? 'color:#ff9100' : 'color:#78909C'; html += `<tr><td><span style="font-family:monospace;font-weight:bold;color:${lc};font-size:10px">${locName}</span></td><td class="cnt" style="color:${lc}">${d.totalContainers}</td><td class="cnt" style="color:#b0bec5">${d.totalPkgs}</td><td style="${dwC};font-size:10px;font-family:monospace">${d.maxDwell}m</td></tr>`; }
@@ -3916,22 +4030,22 @@ ${eyeBtn}
     updateFmcPanel() {
         const meta = document.getElementById('fmc-meta'), list = document.getElementById('fmc-list');
         const siteCode = CONFIG.fmcSiteCode || GM_getValue('shipmap_fmc_site_code', 'AT1hgc');
-        if (FMC.loading) { meta.textContent = 'â³ Loading FMC...'; list.innerHTML = '<div class="dp-empty pulse">Fetching...</div>'; return; }
-        if (!FMC.tours.length) { meta.textContent = 'FMC'; list.innerHTML = `<div class="dp-empty">ðŸš› FMC: <strong>${siteCode}</strong><br><span style="font-size:9px;color:#5a6a7a">Open FMC tab or click ðŸ”„</span></div>`; return; }
+        if (FMC.loading) { meta.textContent = '⏳ Loading FMC...'; list.innerHTML = '<div class="dp-empty pulse">Fetching...</div>'; return; }
+        if (!FMC.tours.length) { meta.textContent = 'FMC'; list.innerHTML = `<div class="dp-empty">🚛 FMC: <strong>${siteCode}</strong><br><span style="font-size:9px;color:#5a6a7a">Open FMC tab or click 🔄</span></div>`; return; }
         const s = FMC.summary, t = FMC.lastUpdated;
-        meta.textContent = `${FMC.tours.length} tours Â· ${t ? t.getHours().toString().padStart(2,'0')+':'+t.getMinutes().toString().padStart(2,'0') : '?'}`;
+        meta.textContent = `${FMC.tours.length} tours · ${t ? t.getHours().toString().padStart(2,'0')+':'+t.getMinutes().toString().padStart(2,'0') : '?'}`;
         let html = '';
-        if (s) html += `<div style="padding:8px 12px;border-bottom:1px solid #1a2a3a;font-size:10px;color:#8899aa;display:flex;gap:12px;flex-wrap:wrap"><span>ðŸ“¥ IB:<strong style="color:#4fc3f7">${s.inbound.total}</strong></span><span>ðŸ“¤ OB:<strong style="color:#ff9900">${s.outbound.total}</strong></span><span>ðŸ— Yard:<strong style="color:#69f0ae">${s.yardNow}</strong></span>${s.delayed.arrival + s.delayed.departure > 0 ? `<span>âš ï¸ <strong style="color:#ff5252">${s.delayed.arrival + s.delayed.departure}</strong> delayed</span>` : ''}</div>`;
+        if (s) html += `<div style="padding:8px 12px;border-bottom:1px solid #1a2a3a;font-size:10px;color:#8899aa;display:flex;gap:12px;flex-wrap:wrap"><span>📥 IB:<strong style="color:#4fc3f7">${s.inbound.total}</strong></span><span>📤 OB:<strong style="color:#ff9900">${s.outbound.total}</strong></span><span>🏗 Yard:<strong style="color:#69f0ae">${s.yardNow}</strong></span>${s.delayed.arrival + s.delayed.departure > 0 ? `<span>⚠️ <strong style="color:#ff5252">${s.delayed.arrival + s.delayed.departure}</strong> delayed</span>` : ''}</div>`;
         if (s?.byCarrier) { const carriers = Object.entries(s.byCarrier).sort((a,b)=>b[1]-a[1]).slice(0,8); html += '<div style="padding:6px 12px">'; for (const [carrier, count] of carriers) { const pct = Math.round(count / FMC.tours.length * 100); html += `<div style="display:flex;gap:6px;align-items:center;padding:2px 0;font-size:10px"><span style="color:#e0e0e0;font-weight:bold;font-family:monospace;min-width:60px">${carrier}</span><div style="flex:1;height:4px;background:#2a3a4a;border-radius:2px;overflow:hidden"><div style="height:100%;width:${pct}%;background:#ff9900;border-radius:2px"></div></div><span style="color:#ff9900;font-weight:bold;min-width:24px;text-align:right">${count}</span></div>`; } html += '</div>'; }
         list.innerHTML = html || '<div class="dp-empty">No data</div>';
     },
 
-    // â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
+    // ═══════════════════════════════════════════════════
     //  DRAWER
-    // â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
+    // ═══════════════════════════════════════════════════
     openDrawer(loadIdx) { const load=State.sspLoads[loadIdx];if(!load?._containers)return;State.drawerOpen=true;State.drawerLoadIdx=loadIdx;document.getElementById('drawer-wrap').classList.add('open');this._renderDrawerSort();this._renderDrawer(load);setTimeout(()=>R.resize(),260); },
     closeDrawer() { if (State.drawerLoadIdx >= 0 && State.sspLoads[State.drawerLoadIdx]) { State.sspLoads[State.drawerLoadIdx]._expanded = false; } State.drawerOpen = false; State.drawerLoadIdx = -1; State.clearHighlight(); document.getElementById('drawer-wrap').classList.remove('open'); UI.updateDataPanel(); setTimeout(() => { R.resize(); R.render(); }, 260); },
-    _renderDrawerSort() { const sortBar=document.getElementById('drawer-sort'); const sorts=[{key:'name',label:'ðŸ“Name'},{key:'content',label:'ðŸ“¦Content'},{key:'dwell',label:'â±Dwell'}]; sortBar.innerHTML=`<label>Sort:</label>`+sorts.map(s=>`<button class="btn sm ${State.drawerSort===s.key?'on':''}" data-dsort="${s.key}">${s.label}</button>`).join(''); sortBar.querySelectorAll('[data-dsort]').forEach(btn=>{btn.addEventListener('click',()=>{State.drawerSort=btn.dataset.dsort;this._renderDrawerSort();const load=State.sspLoads[State.drawerLoadIdx];if(load)this._renderDrawer(load);});}); },
+    _renderDrawerSort() { const sortBar=document.getElementById('drawer-sort'); const sorts=[{key:'name',label:'📍Name'},{key:'content',label:'📦Content'},{key:'dwell',label:'⏱Dwell'}]; sortBar.innerHTML=`<label>Sort:</label>`+sorts.map(s=>`<button class="btn sm ${State.drawerSort===s.key?'on':''}" data-dsort="${s.key}">${s.label}</button>`).join(''); sortBar.querySelectorAll('[data-dsort]').forEach(btn=>{btn.addEventListener('click',()=>{State.drawerSort=btn.dataset.dsort;this._renderDrawerSort();const load=State.sspLoads[State.drawerLoadIdx];if(load)this._renderDrawer(load);});}); },
     _renderDrawer(load) {
 
         const data = load._containers; if (!data) return;
@@ -3941,31 +4055,31 @@ ${eyeBtn}
 
         const yb = yiAll
             ? yiAll.map(yi => yi.fromAnnotation
-                ? `<span class="load-yms-badge load-yms-annotation">ðŸ“${yi.locationCode}</span>`
-                : `<span class="load-yms-badge load-yms-found">âœ…${yi.locationCode}</span>`
+                ? `<span class="load-yms-badge load-yms-annotation">📝${yi.locationCode}</span>`
+                : `<span class="load-yms-badge load-yms-found">✅${yi.locationCode}</span>`
             ).join('')
-            : `<span class="load-yms-badge load-yms-missing">âŒYMS</span>`;
+            : `<span class="load-yms-badge load-yms-missing">❌YMS</span>`;
 
         const drawerCpt = (load.status !== 'DEPARTED' && load.status !== 'CANCELLED') ? cptCountdown(load.cpt) : null;
-        const drawerCptBadge = drawerCpt ? `<span class="cpt-countdown cpt-${drawerCpt.level}" title="CPT: ${load.cpt}">â°${drawerCpt.text}</span>` : '';
+        const drawerCptBadge = drawerCpt ? `<span class="cpt-countdown cpt-${drawerCpt.level}" title="CPT: ${load.cpt}">⏰${drawerCpt.text}</span>` : '';
 
         document.getElementById('drawer-route').innerHTML = `<span>${load.route}</span>`
             + (load.vrId ? `<span style="font-size:11px;font-family:monospace;color:#4fc3f7;cursor:pointer" title="Click to copy" id="drawer-vrid">${load.vrId}</span>` : '')
             + `<span class="load-status" style="background:${load.statusColor};color:#000">${load.statusLabel}</span>`
-            + (load.dockDoor !== 'â€”' ? `<span style="color:#e040fb;font-weight:bold">${load.dockDoor}</span>` : '')
-            + `<span class="load-equip-badge" style="background:${equipTypeColor(load.equipmentType)}20;color:${equipTypeColor(load.equipmentType)}">${load._swapCount > 1 ? `${load._swapCount}Ã— ` : ''}${equipTypeShort(load.equipmentType)}</span>`
+            + (load.dockDoor !== '—' ? `<span style="color:#e040fb;font-weight:bold">${load.dockDoor}</span>` : '')
+            + `<span class="load-equip-badge" style="background:${equipTypeColor(load.equipmentType)}20;color:${equipTypeColor(load.equipmentType)}">${load._swapCount > 1 ? `${load._swapCount}× ` : ''}${equipTypeShort(load.equipmentType, load.vrId, load.subCarrier)}</span>`
             + drawerCptBadge
             + yb;
 
         document.getElementById('drawer-vrid')?.addEventListener('click', () => {
             navigator.clipboard.writeText(load.vrId).then(() => {
                 const el = document.getElementById('drawer-vrid');
-                if (el) { el.textContent = 'âœ… copied'; setTimeout(() => { el.textContent = load.vrId; }, 1500); }
+                if (el) { el.textContent = '✅ copied'; setTimeout(() => { el.textContent = load.vrId; }, 1500); }
             });
         });
 
         const s = data.stats;
-        document.getElementById('drawer-summary').innerHTML = `ðŸ“¦<strong>${s.packageCount}</strong>pkg Â· ðŸ›’<strong>${s.palletCount}</strong>pal Â· ðŸ“<strong>${s.locationCount}</strong>loc Â· âš–ï¸<strong>${s.totalWeightKg}</strong>kg`;
+        document.getElementById('drawer-summary').innerHTML = `📦<strong>${s.packageCount}</strong>pkg · 🛒<strong>${s.palletCount}</strong>pal · 📍<strong>${s.locationCount}</strong>loc · ⚖️<strong>${s.totalWeightKg}</strong>kg`;
 
         const TS = { 'PALLET': 'Pal', 'GAYLORD': 'Gay', 'BAG': 'Bag', 'CART': 'Cart', 'CAGE': 'Cage', 'ROLL_CONTAINER': 'Roll' };
         const TC = { 'PALLET': 'dr-pal', 'GAYLORD': 'dr-gaylord', 'BAG': 'dr-bag', 'CART': 'dr-cart', 'CAGE': 'dr-cage', 'ROLL_CONTAINER': 'dr-roll' };
@@ -4007,18 +4121,18 @@ ${eyeBtn}
                 }
                 for (const [t2, n] of Object.entries(gg)) content += `<span class="dr-badge ${TC[t2] || 'dr-other'}">${n}${TS[t2] || t2}</span>`;
                 const tl = Object.values(gg).reduce((s2, n) => s2 + n, 0);
-                if (tl === 0 && gp === 0 && dc.length > 0) content += `<span style="font-size:9px;color:#5a6a7a">ðŸš›attached</span>`;
+                if (tl === 0 && gp === 0 && dc.length > 0) content += `<span style="font-size:9px;color:#5a6a7a">🚛attached</span>`;
                 if (gp > 0) content += `<span class="dr-badge dr-pkg">${gp}pkg</span>`;
                 contentCount = tl + gp;
             } else {
                 for (const [t2, n] of Object.entries(groups)) content += `<span class="dr-badge ${TC[t2] || 'dr-other'}">${n}${TS[t2] || t2}</span>`;
-                if (loosePkgs > 0) content += `<span class="dr-badge dr-pkg">${loosePkgs}pkg${isDwell ? 'ðŸ“¬' : ''}</span>`;
-                if (emptyCount > 0) content += `<span class="dr-badge dr-empty">âš ${emptyCount}âˆ…</span>`;
+                if (loosePkgs > 0) content += `<span class="dr-badge dr-pkg">${loosePkgs}pkg${isDwell ? '📬' : ''}</span>`;
+                if (emptyCount > 0) content += `<span class="dr-badge dr-empty">⚠${emptyCount}∅</span>`;
             }
 
-            if (!dc.length) content = `<span style="color:#5a6a7a;font-size:9px">âˆ…</span>`;
+            if (!dc.length) content = `<span style="color:#5a6a7a;font-size:9px">∅</span>`;
             if (totalW > 0) content += `<span style="font-size:9px;color:#5a6a7a;margin-left:2px">${Math.round(totalW)}kg</span>`;
-            if (!isGate && contentCount > 0 && contentCount < 20) content += `<span style="font-size:8px;color:#ff9800;margin-left:2px">âš ${contentCount}pkg</span>`;
+            if (!isGate && contentCount > 0 && contentCount < 20) content += `<span style="font-size:8px;color:#ff9800;margin-left:2px">⚠${contentCount}pkg</span>`;
 
             const sfMap = {};
             for (const c2 of dc) {
@@ -4031,9 +4145,9 @@ ${eyeBtn}
 
             const sfEntries = Object.entries(sfMap).sort((a, b) => b[1] - a[1]);
             let sfHtml = '';
-            if (sfEntries.length) { sfHtml = sfEntries.map(([sf, n]) => `<span class="dr-sf-badge">${sf}${n > 1 ? ` Ã—${n}` : ''}</span>`).join(''); }
+            if (sfEntries.length) { sfHtml = sfEntries.map(([sf, n]) => `<span class="dr-sf-badge">${sf}${n > 1 ? ` ×${n}` : ''}</span>`).join(''); }
 
-            const mi = matched ? 'âœ…' : 'âŒ';
+            const mi = matched ? '✅' : '❌';
             const dwellMs = earliestAssoc ? (Date.now() - earliestAssoc.getTime()) : 0;
             const dwellStr = earliestAssoc ? dwellTimeStr(earliestAssoc.toISOString()) : '';
             const dwellMins = earliestAssoc ? dwellTimeMinutes(earliestAssoc.toISOString()) : 0;
@@ -4060,11 +4174,11 @@ ${eyeBtn}
         let rows = '';
         let drawerFilteredOut = rowData.length - filteredRowData.length;
 
-        for (const r2 of filteredRowData) rows += `<tr class="${r2.rc}" data-loc="${r2.label}"><td><span class="dr-loc">${r2.label}</span><span class="dr-match-icon">${r2.mi}</span>${r2.sfHtml ? `<div class="dr-sf-row">${r2.sfHtml}</div>` : ''}</td><td><div class="dr-content">${r2.content}</div></td><td class="dr-dwell-cell ${r2.isLongDwell ? 'long' : ''}">${r2.dwellStr ? `â±${r2.dwellStr}` : 'â€”'}</td></tr>`;
+        for (const r2 of filteredRowData) rows += `<tr class="${r2.rc}" data-loc="${r2.label}"><td><span class="dr-loc">${r2.label}</span><span class="dr-match-icon">${r2.mi}</span>${r2.sfHtml ? `<div class="dr-sf-row">${r2.sfHtml}</div>` : ''}</td><td><div class="dr-content">${r2.content}</div></td><td class="dr-dwell-cell ${r2.isLongDwell ? 'long' : ''}">${r2.dwellStr ? `⏱${r2.dwellStr}` : '—'}</td></tr>`;
 
-        if (drawerFilteredOut > 0) rows += `<tr><td colspan="3" style="text-align:center;font-size:10px;color:#5a6a7a;font-style:italic;padding:6px">ðŸ” ${drawerFilteredOut} locations hidden</td></tr>`;
+        if (drawerFilteredOut > 0) rows += `<tr><td colspan="3" style="text-align:center;font-size:10px;color:#5a6a7a;font-style:italic;padding:6px">🔍 ${drawerFilteredOut} locations hidden</td></tr>`;
 
-        // â”€â”€ Vista Other CPTs (RESTORED from v3.2.2) â”€â”€
+        // ── Vista Other CPTs (RESTORED from v3.2.2) ──
         const sspExclude = {};
         for (const loc of data.locations) {
             if (!/STAGE|HOT[-_\s]?PICK|GENERAL/i.test(loc.label)) continue;
@@ -4089,7 +4203,7 @@ ${eyeBtn}
                 const matched = State.elements.some(el => matchElement(el, loc));
                 const typeBadges = Object.entries(vd.types).map(([t, n]) => `<span class="dr-badge ${TC[t] || 'dr-other'}">${n}${TS[t] || t}</span>`).join('');
                 const dwC = vd.maxDwell > 120 ? 'long' : '';
-                const dwStr = vd.maxDwell > 0 ? `â±${formatDuration(vd.maxDwell * 60000)}` : 'â€”';
+                const dwStr = vd.maxDwell > 0 ? `⏱${formatDuration(vd.maxDwell * 60000)}` : '—';
                 const cptBadges = Object.entries(vd.cpts).sort((a, b) => a[0].localeCompare(b[0])).map(([cpt, cd]) => {
                     const cTypes = Object.entries(cd.types).map(([t, n]) => `${n}${TS[t] || t}`).join('+');
                     return `<span class="dr-cpt-badge">${cpt} <span class="dr-cpt-cnt">${cTypes}</span></span>`;
@@ -4099,10 +4213,10 @@ ${eyeBtn}
 
             const grandTypesStr = Object.entries(vistaGrandTotal).map(([t, n]) => `<span class="dr-badge ${TC[t] || 'dr-other'}">${n}${TS[t] || t}</span>`).join('');
 
-            vistaHtml = `<div class="other-cpt-section"><div class="other-cpt-header" id="other-cpt-toggle"><span>ðŸ“¦ Other CPTs on stages for <b>${load.route}</b> Â· ${vistaGrandCnt} cnt</span><span class="other-cpt-count">${vistaLocs.length}</span></div><div class="other-cpt-body" id="other-cpt-body" style="display:none"><table class="dtable"><thead><tr><th>Location</th><th>Content &amp; CPT</th><th>Dwell</th></tr></thead><tbody>${vistaTableRows}<tr class="vista-total-row"><td style="font-weight:bold;color:#ff9900">TOTAL</td><td><div class="dr-content">${grandTypesStr}<span style="font-size:9px;color:#ff9900;margin-left:4px">${vistaGrandPkgs}pkg</span></div></td><td></td></tr></tbody></table></div></div>`;
+            vistaHtml = `<div class="other-cpt-section"><div class="other-cpt-header" id="other-cpt-toggle"><span>📦 Other CPTs on stages for <b>${load.route}</b> · ${vistaGrandCnt} cnt</span><span class="other-cpt-count">${vistaLocs.length}</span></div><div class="other-cpt-body" id="other-cpt-body" style="display:none"><table class="dtable"><thead><tr><th>Location</th><th>Content &amp; CPT</th><th>Dwell</th></tr></thead><tbody>${vistaTableRows}<tr class="vista-total-row"><td style="font-weight:bold;color:#ff9900">TOTAL</td><td><div class="dr-content">${grandTypesStr}<span style="font-size:9px;color:#ff9900;margin-left:4px">${vistaGrandPkgs}pkg</span></div></td><td></td></tr></tbody></table></div></div>`;
         }
 
-        // â”€â”€ STEM Chutes matching this load's route â”€â”€
+        // ── STEM Chutes matching this load's route ──
         let stemHtml = '';
         if (CONFIG.data.stemEnabled && Object.keys(State.stemElementMap).length) {
             const loadRoute = parseRoute(load.route).toUpperCase();
@@ -4117,9 +4231,9 @@ ${eyeBtn}
             if (stemMatches.length) {
                 const stemRows = stemMatches.map(s => {
                     const matched = State.elements.some(el => (el.name || el.id) === s.elKey);
-                    return `<tr class="${matched ? 'dr-matched' : 'dr-unmatched'}" data-loc="${s.elKey}"><td><span class="dr-loc">${s.chuteLabel}</span></td><td style="color:#00bcd4;font-weight:600">ðŸ”€ ${s.direction}</td><td style="color:#78909C;font-size:9px">${s.userLogin || ''}</td></tr>`;
+                    return `<tr class="${matched ? 'dr-matched' : 'dr-unmatched'}" data-loc="${s.elKey}"><td><span class="dr-loc">${s.chuteLabel}</span></td><td style="color:#00bcd4;font-weight:600">🔀 ${s.direction}</td><td style="color:#78909C;font-size:9px">${s.userLogin || ''}</td></tr>`;
                 }).join('');
-                stemHtml = `<div class="other-cpt-section"><div class="other-cpt-header" id="stem-chutes-toggle"><span>ðŸ”€ STEM Chutes for <b>${load.route}</b></span><span class="other-cpt-count" style="background:#00bcd4">${stemMatches.length}</span></div><div class="other-cpt-body" id="stem-chutes-body" style="display:none"><table class="dtable"><thead><tr><th>Chute</th><th>Direction</th><th>User</th></tr></thead><tbody>${stemRows}</tbody></table></div></div>`;
+                stemHtml = `<div class="other-cpt-section"><div class="other-cpt-header" id="stem-chutes-toggle"><span>🔀 STEM Chutes for <b>${load.route}</b></span><span class="other-cpt-count" style="background:#00bcd4">${stemMatches.length}</span></div><div class="other-cpt-body" id="stem-chutes-body" style="display:none"><table class="dtable"><thead><tr><th>Chute</th><th>Direction</th><th>User</th></tr></thead><tbody>${stemRows}</tbody></table></div></div>`;
             }
         }
 
@@ -4134,18 +4248,18 @@ ${eyeBtn}
     },
 
 
-    // â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
+    // ═══════════════════════════════════════════════════
     //  INSPECTOR
-    // â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
+    // ═══════════════════════════════════════════════════
     showInspector(el, ro=false) {
         if (!el) { this.clearInspector(); return; } ro = ro || !State.editMode;
 
         const effMax = getEffectiveMaxContainers(el.name || el.id);
         const autoMaxInfo = effMax.source === 'auto'
-            ? `<div style="font-size:9px;color:#4fc3f7;margin-top:-4px;margin-bottom:6px">âš¡ Auto: ${effMax.max} (${effMax.label})</div>`
+            ? `<div style="font-size:9px;color:#4fc3f7;margin-top:-4px;margin-bottom:6px">⚡ Auto: ${effMax.max} (${effMax.label})</div>`
             : (effMax.source === 'none' && !el.maxContainers ? '<div style="font-size:9px;color:#5a6a7a;margin-top:-4px;margin-bottom:6px">No trailer detected</div>' : '');
 
-        document.getElementById('insp').innerHTML = `<div class="fld"><label>ID</label><input value="${el.id}" readonly></div><div class="fld"><label>Name</label><input id="i-name" value="${el.name||''}" ${ro?'readonly':''}></div><div class="fld"><label>ðŸ”— Chute</label><input id="i-chute" value="${el.chute||''}" ${ro?'readonly':''} spellcheck="false"></div><div class="fld"><label>Type</label><select id="i-type" ${ro?'disabled':''}>${Object.entries(ELEMENT_TYPES).map(([k,t])=>`<option value="${k}" ${k===el.type?'selected':''}>${t.label}</option>`).join('')}</select></div><div class="fr"><div class="fld"><label>X</label><input type="number" id="i-x" value="${el.x}" step="${CONFIG.grid.size}" ${ro?'readonly':''}></div><div class="fld"><label>Y</label><input type="number" id="i-y" value="${el.y}" step="${CONFIG.grid.size}" ${ro?'readonly':''}></div></div><div class="fr"><div class="fld"><label>W</label><input type="number" id="i-w" value="${el.w}" step="${CONFIG.grid.size}" min="${CONFIG.grid.size}" ${ro?'readonly':''}></div><div class="fld"><label>H</label><input type="number" id="i-h" value="${el.h}" step="${CONFIG.grid.size}" min="${CONFIG.grid.size}" ${ro?'readonly':''}></div></div><div class="fld"><label>ðŸ“¦ Max Containers</label><input type="number" id="i-maxc" value="${el.maxContainers||0}" min="0" placeholder="0 = auto" ${ro?'readonly':''}></div>${autoMaxInfo}${!ro?'<button class="btn del" id="i-del" style="width:100%;margin-top:6px">ðŸ—‘ï¸ Delete</button>':''}`;
+        document.getElementById('insp').innerHTML = `<div class="fld"><label>ID</label><input value="${el.id}" readonly></div><div class="fld"><label>Name</label><input id="i-name" value="${el.name||''}" ${ro?'readonly':''}></div><div class="fld"><label>🔗 Chute</label><input id="i-chute" value="${el.chute||''}" ${ro?'readonly':''} spellcheck="false"></div><div class="fld"><label>Type</label><select id="i-type" ${ro?'disabled':''}>${Object.entries(ELEMENT_TYPES).map(([k,t])=>`<option value="${k}" ${k===el.type?'selected':''}>${t.label}</option>`).join('')}</select></div><div class="fr"><div class="fld"><label>X</label><input type="number" id="i-x" value="${el.x}" step="${CONFIG.grid.size}" ${ro?'readonly':''}></div><div class="fld"><label>Y</label><input type="number" id="i-y" value="${el.y}" step="${CONFIG.grid.size}" ${ro?'readonly':''}></div></div><div class="fr"><div class="fld"><label>W</label><input type="number" id="i-w" value="${el.w}" step="${CONFIG.grid.size}" min="${CONFIG.grid.size}" ${ro?'readonly':''}></div><div class="fld"><label>H</label><input type="number" id="i-h" value="${el.h}" step="${CONFIG.grid.size}" min="${CONFIG.grid.size}" ${ro?'readonly':''}></div></div><div class="fld"><label>📦 Max Containers</label><input type="number" id="i-maxc" value="${el.maxContainers||0}" min="0" placeholder="0 = auto" ${ro?'readonly':''}></div>${autoMaxInfo}${!ro?'<button class="btn del" id="i-del" style="width:100%;margin-top:6px">🗑️ Delete</button>':''}`;
 
         if (!ro) {
             const bind = (id, prop, fn=v=>v) => { document.getElementById(id)?.addEventListener('change', e => { State.pushUndo(); el[prop] = fn(e.target.value); State.save(); this.refreshList(); R.render(); }); };
@@ -4211,9 +4325,9 @@ ${eyeBtn}
             const isHL = State.isHighlighted(el);
             const hl2 = State.getHighlight(el);
             const isDwell = isHL && hl2?.onlyLoose;
-            const ct = el.chute ? `<span style="color:#5a7a9a;font-size:9px">ðŸ”—</span>` : '';
-            const ht = isDwell ? '<span style="color:#78909C;font-size:9px">ðŸ“¬</span>' : (isHL ? '<span style="color:#ff9900;font-size:9px">ðŸ”¦</span>' : '');
-            const dt = State.editMode ? `<button class="eli-del" data-del-id="${el.id}">âœ•</button>` : '';
+            const ct = el.chute ? `<span style="color:#5a7a9a;font-size:9px">🔗</span>` : '';
+            const ht = isDwell ? '<span style="color:#78909C;font-size:9px">📬</span>' : (isHL ? '<span style="color:#ff9900;font-size:9px">🔦</span>' : '');
+            const dt = State.editMode ? `<button class="eli-del" data-del-id="${el.id}">✕</button>` : '';
             return `<div class="eli ${State.isSelected(el)?'sel':''}" data-id="${el.id}"><div class="esw" style="background:${t?.color||'#888'}"></div><span style="flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${el.name||el.id}</span><span style="display:flex;align-items:center;gap:2px">${ct}${ht}${dt}</span></div>`;
         }).join('');
 
@@ -4244,22 +4358,22 @@ ${eyeBtn}
     },
     showYmsHint(wh) { const bar = document.getElementById('yms-token-bar'); if (bar) bar.classList.remove('collapsed'); },
 
-    // â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
+    // ═══════════════════════════════════════════════════
     //  OVERLAYS
-    // â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
+    // ═══════════════════════════════════════════════════
     openSummary() {
         document.getElementById('summary-overlay')?.remove(); const data = Summary.build();
         const overlay = document.createElement('div'); overlay.id = 'summary-overlay'; overlay.className = 'summary-overlay';
         overlay.innerHTML = `<div class="summary-panel">${Summary.render(data)}</div>`; document.body.appendChild(overlay);
         document.getElementById('summary-close').onclick = () => overlay.remove();
-        document.getElementById('summary-copy').onclick = () => { navigator.clipboard.writeText(Summary.toClipboard(data)).then(() => { UI.setStatus('ðŸ“‹ Copied!'); }); };
+        document.getElementById('summary-copy').onclick = () => { navigator.clipboard.writeText(Summary.toClipboard(data)).then(() => { UI.setStatus('📋 Copied!'); }); };
         document.getElementById('summary-refresh').onclick = () => { const nd = Summary.build(); document.querySelector('.summary-panel').innerHTML = Summary.render(nd); document.getElementById('summary-close').onclick = () => overlay.remove(); document.getElementById('summary-copy').onclick = () => { navigator.clipboard.writeText(Summary.toClipboard(nd)); }; };
         overlay.addEventListener('click', (e) => { if (e.target === overlay) overlay.remove(); });
     },
     openQuickNav() {
         document.getElementById('quicknav-overlay')?.remove();
         const overlay = document.createElement('div'); overlay.id = 'quicknav-overlay'; overlay.className = 'quicknav-overlay';
-        overlay.innerHTML = `<div class="quicknav-box"><div style="font-size:11px;color:#8899aa;margin-bottom:8px;text-transform:uppercase">âŒ¨ï¸ Quick Nav</div><input class="quicknav-input" id="quicknav-input" placeholder="Type location name..." spellcheck="false"><div class="quicknav-results" id="quicknav-results"></div><div class="quicknav-hint">â†‘â†“ navigate Â· Enter select Â· Esc close</div></div>`;
+        overlay.innerHTML = `<div class="quicknav-box"><div style="font-size:11px;color:#8899aa;margin-bottom:8px;text-transform:uppercase">⌨️ Quick Nav</div><input class="quicknav-input" id="quicknav-input" placeholder="Type location name..." spellcheck="false"><div class="quicknav-results" id="quicknav-results"></div><div class="quicknav-hint">↑↓ navigate · Enter select · Esc close</div></div>`;
         document.body.appendChild(overlay);
         const input = document.getElementById('quicknav-input'), resultsList = document.getElementById('quicknav-results'); let matches = [], activeIdx = 0;
         const updateResults = () => { const q = input.value.toUpperCase().trim(); if (!q) { matches = []; resultsList.innerHTML = ''; return; } matches = State.elements.filter(el => { const name = (el.name || el.id).toUpperCase(); const chute = (el.chute || '').toUpperCase(); return name.includes(q) || chute.includes(q); }).slice(0, 8); activeIdx = 0; renderResults(); };
@@ -4271,9 +4385,9 @@ ${eyeBtn}
         setTimeout(() => input.focus(), 50);
     },
 
-    // â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
+    // ═══════════════════════════════════════════════════
     //  SIDEBAR + DASHBOARD
-    // â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
+    // ═══════════════════════════════════════════════════
 openTrend() {
         document.getElementById('trend-overlay')?.remove();
         var overlay = document.createElement('div');
@@ -4405,14 +4519,14 @@ openTrend() {
         const shift = getCurrentShift();
         const fmtTime = (d) => `${d.getHours().toString().padStart(2,'0')}:${d.getMinutes().toString().padStart(2,'0')}`;
 
-        // â”€â”€ Shift start snapshot from trend data â”€â”€
+        // ── Shift start snapshot from trend data ──
         const trendData = Trend.getData();
         const shiftStart = shift.startDate.getTime();
         const startSnap = trendData.find(s => s.ts >= shiftStart) || trendData[0] || null;
         const nowSnap = trendData.length ? trendData[trendData.length - 1] : null;
 
-        // â”€â”€ Current Vista state â”€â”€ remaining on stages/fields â”€â”€
-        const TS = { 'PALLET': 'ðŸ›’ Pallet', 'GAYLORD': 'ðŸ“« Gaylord', 'CART': 'ðŸ›’ Cart', 'BAG': 'ðŸ‘œ Bag' };
+        // ── Current Vista state ── remaining on stages/fields ──
+        const TS = { 'PALLET': '🛒 Pallet', 'GAYLORD': '📫 Gaylord', 'CART': '🛒 Cart', 'BAG': '👜 Bag' };
         const TC = { 'PALLET': '#ffd600', 'GAYLORD': '#e040fb', 'CART': '#69f0ae', 'BAG': '#4fc3f7' };
 
         const remaining = State.vistaContainers.filter(c => c._state !== 'Loaded');
@@ -4438,7 +4552,7 @@ openTrend() {
 
         const remainLocs = Object.entries(remainByLoc).sort((a, b) => b[1].total - a[1].total);
 
-        // â”€â”€ Delta calculation (shift processed) â”€â”€
+        // ── Delta calculation (shift processed) ──
         const processed = {};
         let processedTotal = 0;
         if (startSnap && nowSnap && startSnap.vista?.typesByState && nowSnap.vista?.typesByState) {
@@ -4451,20 +4565,20 @@ openTrend() {
             }
         }
 
-        // â”€â”€ SSP departed count â”€â”€
+        // ── SSP departed count ──
         const shiftLoads = State.sspLoads.filter(l => {
             if (l.status !== 'DEPARTED') return false;
-            if (!l.sdt || l.sdt === 'â€”') return false;
+            if (!l.sdt || l.sdt === '—') return false;
             try { const d = new Date(l.sdt); return d >= shift.startDate && d <= shift.endDate; } catch { return false; }
         });
 
         const departedByEquip = {};
         for (const l of shiftLoads) {
-            const eq = equipTypeShort(l.equipmentType) || 'OTHER';
+            const eq = equipTypeShort(l.equipmentType, l.vrId, l.subCarrier) || 'OTHER';
             departedByEquip[eq] = (departedByEquip[eq] || 0) + 1;
         }
 
-        // â”€â”€ YMS current snapshot â”€â”€
+        // ── YMS current snapshot ──
         const ymsTrailers = [];
         const fieldTrailers = [];
         for (const loc of State.ymsLocations) {
@@ -4483,7 +4597,7 @@ openTrend() {
                 const vistaTypes = vistaLoc ? { ...vistaLoc.types } : {};
                 const vistaPkgs = vistaLoc ? vistaLoc.totalPkgs : 0;
                 const vistaTotal = vistaLoc ? vistaLoc.totalContainers : 0;
-                const entry = { location: loc.code, type: equipTypeShort(asset.type), eqColor: equipTypeColor(asset.type), owner: asset.owner?.code || asset.broker?.code || 'â€”', vrId, status: asset.status, route, sspStatus, vistaTypes, vistaPkgs, vistaTotal, isField };
+                const entry = { location: loc.code, type: equipTypeShort(asset.type, vrId), eqColor: equipTypeColor(asset.type), owner: asset.owner?.code || asset.broker?.code || '—', vrId, status: asset.status, route, sspStatus, vistaTypes, vistaPkgs, vistaTotal, isField };
                 ymsTrailers.push(entry);
                 if (isField && (asset.status === 'FULL' || asset.status === 'IN_PROGRESS' || vistaTotal > 0)) { fieldTrailers.push(entry); }
             }
@@ -4497,7 +4611,7 @@ openTrend() {
             fieldByType[dominantType].push(ft);
         }
 
-        // â”€â”€ SSP MISS TRACKER â”€â”€
+        // ── SSP MISS TRACKER ──
         const sspMisses = [];
         for (const l of State.sspLoads) {
             if (l.status === 'DEPARTED' || l.status === 'CANCELLED') continue;
@@ -4507,11 +4621,11 @@ openTrend() {
             const overdueMins = Math.floor((Date.now() - sdtDate.getTime()) / 60000);
             let pkgCount = 0, containerCount = 0;
             if (l._containers) { pkgCount = l._containers.stats.packageCount || 0; containerCount = l._containers.stats.locationCount || 0; }
-            sspMisses.push({ route: l.route, rawRoute: l.rawRoute, vrId: l.vrId || 'â€”', status: l.statusShort, statusColor: l.statusColor, sdt: l.sdt, dockDoor: l.dockDoor, equipType: equipTypeShort(l.equipmentType), overdueMins, pkgCount, containerCount });
+            sspMisses.push({ route: l.route, rawRoute: l.rawRoute, vrId: l.vrId || '—', status: l.statusShort, statusColor: l.statusColor, sdt: l.sdt, dockDoor: l.dockDoor, equipType: equipTypeShort(l.equipmentType, l.vrId, l.subCarrier), overdueMins, pkgCount, containerCount });
         }
         sspMisses.sort((a, b) => b.overdueMins - a.overdueMins);
 
-        // â”€â”€ VISTA MISS TRACKER â”€â”€
+        // ── VISTA MISS TRACKER ──
         const now = Date.now();
         const vistaMissMap = {};
         for (const c of State.vistaContainers) {
@@ -4528,9 +4642,9 @@ openTrend() {
             if (now - cptMs < 30 * 60000) continue;
             const overdueMins = Math.floor((now - cptMs) / 60000);
             const route = c.route ? routeGroupKey(c.route) : 'UNKNOWN';
-            const containerName = c.id || c.type || 'â€”';
+            const containerName = c.id || c.type || '—';
             if (!vistaMissMap[route]) vistaMissMap[route] = [];
-            vistaMissMap[route].push({ containerName, type: c.type, childCount: c.childCount, location: c.location || 'â€”', state: c._state, overdueMins, cptMs });
+            vistaMissMap[route].push({ containerName, type: c.type, childCount: c.childCount, location: c.location || '—', state: c._state, overdueMins, cptMs });
         }
 
         const vistaMisses = Object.entries(vistaMissMap)
@@ -4539,11 +4653,11 @@ openTrend() {
         const vistaMissTotal = vistaMisses.reduce((s, r) => s + r.totalContainers, 0);
         const vistaMissTotalPkgs = vistaMisses.reduce((s, r) => s + r.totalPkgs, 0);
 
-        // â”€â”€ Render â”€â”€
+        // ── Render ──
         const processedCards = Object.entries(processed).length
             ? Object.entries(processed).map(([t, n]) => `<div class="handover-card"><div class="handover-card-val" style="color:${TC[t] || '#ff9900'}">${n}</div><div class="handover-card-label">${TS[t] || t}</div></div>`).join('')
               + `<div class="handover-card"><div class="handover-card-val" style="color:#ff9900">${processedTotal}</div><div class="handover-card-label">Total loaded</div></div>`
-            : '<div style="color:#5a6a7a;font-size:11px;font-style:italic;padding:8px">No trend data from shift start yet â€” snapshots every 10min</div>';
+            : '<div style="color:#5a6a7a;font-size:11px;font-style:italic;padding:8px">No trend data from shift start yet — snapshots every 10min</div>';
 
         const remainCards = Object.entries(remainTypes).length
             ? Object.entries(remainTypes).map(([t, n]) => `<div class="handover-card"><div class="handover-card-val" style="color:${TC[t] || '#ff9900'}">${n}</div><div class="handover-card-label">${TS[t] || t}</div></div>`).join('')
@@ -4552,10 +4666,10 @@ openTrend() {
 
         const locRows = remainLocs.map(([loc, d]) => {
             const types = Object.entries(d.types).map(([t, n]) => `<span class="handover-type-badge" style="background:${TC[t] || '#5a6a7a'}22;color:${TC[t] || '#8899aa'}">${n} ${(TS[t] || t).replace(/^[^\s]+\s/, '')}</span>`).join('');
-            const topRoutes = Object.entries(d.routes).sort((a, b) => b[1] - a[1]).slice(0, 3).map(([r, n]) => `${r} Ã—${n}`).join(', ');
+            const topRoutes = Object.entries(d.routes).sort((a, b) => b[1] - a[1]).slice(0, 3).map(([r, n]) => `${r} ×${n}`).join(', ');
             const dwC = d.maxDwell > 120 ? '#ff5252' : d.maxDwell > 60 ? '#ff9100' : '#78909C';
             const matched = State.elements.some(el => matchElement(el, loc));
-            return `<tr><td style="font-family:monospace;font-weight:bold;color:${matched ? '#e0e0e0' : '#ff5252'};white-space:nowrap">${loc} ${matched ? '' : 'âŒ'}</td><td>${types}</td><td style="text-align:center;font-weight:bold;color:#ff9900">${d.total}</td><td style="text-align:center;color:#b0bec5">${d.pkgs}</td><td style="font-family:monospace;color:${dwC};font-size:10px">${d.maxDwell > 0 ? d.maxDwell + 'm' : 'â€”'}</td><td style="font-size:9px;color:#78909C">${topRoutes}</td></tr>`;
+            return `<tr><td style="font-family:monospace;font-weight:bold;color:${matched ? '#e0e0e0' : '#ff5252'};white-space:nowrap">${loc} ${matched ? '' : '❌'}</td><td>${types}</td><td style="text-align:center;font-weight:bold;color:#ff9900">${d.total}</td><td style="text-align:center;color:#b0bec5">${d.pkgs}</td><td style="font-family:monospace;color:${dwC};font-size:10px">${d.maxDwell > 0 ? d.maxDwell + 'm' : '—'}</td><td style="font-size:9px;color:#78909C">${topRoutes}</td></tr>`;
         }).join('');
 
         const departedCards = Object.entries(departedByEquip).length
@@ -4569,15 +4683,15 @@ openTrend() {
 
         overlay.innerHTML = `<div class="handover-panel">
 <div class="handover-hdr">
-<h2>ðŸ“‹ Shift Handover â€” <span style="background:#ff9900;color:#000;padding:2px 10px;border-radius:10px;font-size:13px">${shift.label}</span>
-<span style="font-size:12px;color:#8899aa;font-weight:normal;font-family:monospace;margin-left:8px">${fmtTime(shift.startDate)} â†’ ${fmtTime(shift.endDate)}</span>
+<h2>📋 Shift Handover — <span style="background:#ff9900;color:#000;padding:2px 10px;border-radius:10px;font-size:13px">${shift.label}</span>
+<span style="font-size:12px;color:#8899aa;font-weight:normal;font-family:monospace;margin-left:8px">${fmtTime(shift.startDate)} → ${fmtTime(shift.endDate)}</span>
 </h2>
-<button class="summary-close" id="handover-close">âœ•</button>
+<button class="summary-close" id="handover-close">✕</button>
 </div>
 <div class="handover-body">
 
 ${sspMisses.length ? `<div class="handover-section">
-<h3 style="color:#ff1744">ðŸš¨ SSP Missed CPT (${sspMisses.length} loads)
+<h3 style="color:#ff1744">🚨 SSP Missed CPT (${sspMisses.length} loads)
 <span style="font-size:10px;color:#8899aa;font-weight:normal">SDT=CPT, 30+ min overdue, not departed</span>
 </h3>
 <div style="overflow-x:auto;border:2px solid rgba(255,23,68,0.3);border-radius:6px">
@@ -4586,7 +4700,7 @@ ${sspMisses.length ? `<div class="handover-section">
 <tbody>${sspMisses.map(m => `<tr style="background:rgba(255,23,68,0.05)">
 <td style="font-family:monospace;font-weight:bold;color:#fff">${m.route}</td>
 <td><span class="load-status" style="background:${m.statusColor};color:#000;font-size:9px">${m.status}</span></td>
-<td style="color:#e040fb;font-weight:bold">${m.dockDoor !== 'â€”' ? m.dockDoor : 'â€”'}</td>
+<td style="color:#e040fb;font-weight:bold">${m.dockDoor !== '—' ? m.dockDoor : '—'}</td>
 <td style="font-family:monospace;color:#4fc3f7;font-size:10px">${m.vrId}</td>
 <td style="color:#e0e0e0;font-size:10px">${m.equipType}</td>
 <td style="text-align:center;color:#ff9900;font-weight:bold">${m.pkgCount || '?'}</td>
@@ -4595,12 +4709,12 @@ ${sspMisses.length ? `<div class="handover-section">
 </table></div></div>` : ''}
 
 ${vistaMisses.length ? `<div class="handover-section">
-<h3 style="color:#ff1744">ðŸ“¦ Vista Missed CPT (${vistaMissTotal} containers Â· ${vistaMissTotalPkgs} pkg)
+<h3 style="color:#ff1744">📦 Vista Missed CPT (${vistaMissTotal} containers · ${vistaMissTotalPkgs} pkg)
 <span style="font-size:10px;color:#8899aa;font-weight:normal">CPT + 30min passed, not loaded</span>
 </h3>
 ${vistaMisses.map(r => `<div style="margin-bottom:10px">
 <div style="font-size:11px;font-weight:bold;color:#ff9900;margin-bottom:4px;display:flex;align-items:center;gap:8px">
-â†’ ${r.route} <span style="color:#ff1744;font-size:10px">${r.totalContainers} cnt Â· ${r.totalPkgs} pkg</span>
+→ ${r.route} <span style="color:#ff1744;font-size:10px">${r.totalContainers} cnt · ${r.totalPkgs} pkg</span>
 </div>
 <div style="overflow-x:auto;border:1px solid rgba(255,23,68,0.2);border-radius:6px">
 <table class="handover-loc-table">
@@ -4621,31 +4735,31 @@ ${vistaMisses.map(r => `<div style="margin-bottom:10px">
 </div>` : ''}
 
 <div class="handover-section">
-<h3>âœ… Loaded this shift</h3>
+<h3>✅ Loaded this shift</h3>
 <div class="handover-grid">${processedCards}</div>
 </div>
 
 <div class="handover-section">
-<h3>âœˆï¸ Departed this shift (${shiftLoads.length} loads)</h3>
+<h3>✈️ Departed this shift (${shiftLoads.length} loads)</h3>
 <div class="handover-grid">${departedCards}</div>
 </div>
 
 <div class="handover-section">
-<h3>ðŸ“¦ Remaining to load <span style="font-size:11px;color:#8899aa;font-weight:normal">(${remaining.length} containers Â· ${remainLocs.length} locations)</span></h3>
+<h3>📦 Remaining to load <span style="font-size:11px;color:#8899aa;font-weight:normal">(${remaining.length} containers · ${remainLocs.length} locations)</span></h3>
 <div class="handover-grid">${remainCards}</div>
 </div>
 
 <div class="handover-section">
-<h3>ðŸ“ Remaining by location</h3>
+<h3>📍 Remaining by location</h3>
 ${remainLocs.length ? `<div style="max-height:40vh;overflow-y:auto;border:1px solid #2a3a4a;border-radius:6px">
 <table class="handover-loc-table">
 <thead><tr><th>Location</th><th>Containers</th><th style="text-align:center">Cnt</th><th style="text-align:center">Pkg</th><th>Dwell</th><th>Routes</th></tr></thead>
 <tbody>${locRows}</tbody>
-</table></div>` : '<div style="color:#69f0ae;font-size:12px;padding:12px;text-align:center">ðŸŽ‰ All clear!</div>'}
+</table></div>` : '<div style="color:#69f0ae;font-size:12px;padding:12px;text-align:center">🎉 All clear!</div>'}
 </div>
 
 ${fieldTrailers.length ? `<div class="handover-section">
-<h3>ðŸ—ï¸ Awaiting unload on fields (${fieldTrailers.length} trailers)</h3>
+<h3>🏗️ Awaiting unload on fields (${fieldTrailers.length} trailers)</h3>
 ${Object.entries(fieldByType).sort((a, b) => b[1].length - a[1].length).map(([type, trailers]) => {
     const typeLabel = TS[type] || type;
     const typeColor = TC[type] || '#8899aa';
@@ -4663,11 +4777,11 @@ ${Object.entries(fieldByType).sort((a, b) => b[1].length - a[1].length).map(([ty
 <td style="font-family:monospace;font-weight:bold;color:#fff">${ft.location}</td>
 <td><span style="color:${ft.eqColor};font-weight:bold;font-size:10px">${ft.type}</span></td>
 <td style="color:#e0e0e0">${ft.owner}</td>
-<td style="font-family:monospace;color:#4fc3f7;font-size:10px">${ft.vrId || 'â€”'}</td>
-<td style="font-size:10px;color:#e0e0e0">${ft.route || 'â€”'}${ft.sspStatus ? `<span style="color:#5a6a7a">(${ft.sspStatus})</span>` : ''}</td>
-<td style="text-align:center;color:#ff9900;font-weight:bold">${ft.vistaTotal || 'â€”'}</td>
-<td style="text-align:center;color:#b0bec5">${ft.vistaPkgs || 'â€”'}</td>
-<td style="color:${ft.status === 'FULL' ? '#ffd600' : ft.status === 'IN_PROGRESS' ? '#69f0ae' : '#e0e0e0'}">${ft.status || 'â€”'}</td>
+<td style="font-family:monospace;color:#4fc3f7;font-size:10px">${ft.vrId || '—'}</td>
+<td style="font-size:10px;color:#e0e0e0">${ft.route || '—'}${ft.sspStatus ? `<span style="color:#5a6a7a">(${ft.sspStatus})</span>` : ''}</td>
+<td style="text-align:center;color:#ff9900;font-weight:bold">${ft.vistaTotal || '—'}</td>
+<td style="text-align:center;color:#b0bec5">${ft.vistaPkgs || '—'}</td>
+<td style="color:${ft.status === 'FULL' ? '#ffd600' : ft.status === 'IN_PROGRESS' ? '#69f0ae' : '#e0e0e0'}">${ft.status || '—'}</td>
 </tr>`;
 }).join('')}</tbody>
 </table></div></div>`;
@@ -4675,7 +4789,7 @@ ${Object.entries(fieldByType).sort((a, b) => b[1].length - a[1].length).map(([ty
 </div>` : ''}
 
 ${ymsTrailers.length ? `<div class="handover-section">
-<h3>ðŸš› Trailers with loads in yard (${ymsTrailers.length})</h3>
+<h3>🚛 Trailers with loads in yard (${ymsTrailers.length})</h3>
 <div style="max-height:30vh;overflow-y:auto;border:1px solid #2a3a4a;border-radius:6px">
 <table class="handover-loc-table">
 <thead><tr><th>Location</th><th>Type</th><th>Owner</th><th>VR ID</th><th>Status</th></tr></thead>
@@ -4683,15 +4797,15 @@ ${ymsTrailers.length ? `<div class="handover-section">
 <td style="font-family:monospace;font-weight:bold;color:#fff">${t.location}</td>
 <td style="color:#e0e0e0">${t.type}</td>
 <td style="color:#e0e0e0">${t.owner}</td>
-<td style="font-family:monospace;color:#4fc3f7;font-size:10px">${t.vrId || 'â€”'}</td>
-<td style="color:${t.status === 'FULL' ? '#ffd600' : t.status === 'IN_PROGRESS' ? '#69f0ae' : '#e0e0e0'}">${t.status || 'â€”'}</td>
+<td style="font-family:monospace;color:#4fc3f7;font-size:10px">${t.vrId || '—'}</td>
+<td style="color:${t.status === 'FULL' ? '#ffd600' : t.status === 'IN_PROGRESS' ? '#69f0ae' : '#e0e0e0'}">${t.status || '—'}</td>
 </tr>`).join('')}</tbody>
 </table></div></div>` : ''}
 
 </div>
 <div class="handover-footer">
-<span style="font-size:10px;color:#5a6a7a">ðŸ“‹ ${CONFIG.warehouseId} Â· ${shift.label} Â· ${new Date().toLocaleString()} Â· v3.4.0</span>
-<div style="display:flex;gap:6px"><button class="btn sm" id="handover-copy">ðŸ“‹ Copy</button></div>
+<span style="font-size:10px;color:#5a6a7a">📋 ${CONFIG.warehouseId} · ${shift.label} · ${new Date().toLocaleString()} · v3.4.0</span>
+<div style="display:flex;gap:6px"><button class="btn sm" id="handover-copy">📋 Copy</button></div>
 </div>
 </div>`;
 
@@ -4701,66 +4815,66 @@ ${ymsTrailers.length ? `<div class="handover-section">
         overlay.addEventListener('click', (e) => { if (e.target === overlay) overlay.remove(); });
 
         document.getElementById('handover-copy').onclick = () => {
-            let text = `ðŸ“‹ SHIFT HANDOVER â€” ${CONFIG.warehouseId} ${shift.label}\n`;
-            text += `${fmtTime(shift.startDate)} â†’ ${fmtTime(shift.endDate)}\n${'â•'.repeat(50)}\n\n`;
+            let text = `📋 SHIFT HANDOVER — ${CONFIG.warehouseId} ${shift.label}\n`;
+            text += `${fmtTime(shift.startDate)} → ${fmtTime(shift.endDate)}\n${'═'.repeat(50)}\n\n`;
 
             if (sspMisses.length) {
-                text += `ðŸš¨ SSP MISSED CPT (${sspMisses.length} loads):\n`;
+                text += `🚨 SSP MISSED CPT (${sspMisses.length} loads):\n`;
                 for (const m of sspMisses) { text += `  ${m.route} | ${m.status} | Door:${m.dockDoor} | ${m.vrId} | ${m.pkgCount || '?'}pkg | ${m.overdueMins}m overdue\n`; }
                 text += '\n';
             }
 
             if (vistaMisses.length) {
-                text += `ðŸ“¦ VISTA MISSED CPT (${vistaMissTotal} cnt Â· ${vistaMissTotalPkgs} pkg):\n`;
+                text += `📦 VISTA MISSED CPT (${vistaMissTotal} cnt · ${vistaMissTotalPkgs} pkg):\n`;
                 for (const r of vistaMisses) {
-                    text += `  â†’ ${r.route} (${r.totalContainers} cnt Â· ${r.totalPkgs} pkg):\n`;
+                    text += `  → ${r.route} (${r.totalContainers} cnt · ${r.totalPkgs} pkg):\n`;
                     for (const c of r.containers) { text += `    ${c.containerName} | ${c.type} | ${c.location} | ${c.state} | ${c.childCount}pkg | ${c.overdueMins}m overdue\n`; }
                 }
                 text += '\n';
             }
 
-            text += `âœ… LOADED THIS SHIFT:\n`;
+            text += `✅ LOADED THIS SHIFT:\n`;
             if (Object.keys(processed).length) {
                 for (const [t, n] of Object.entries(processed)) text += `  ${(TS[t] || t).replace(/^[^\s]+\s/, '')}: ${n}\n`;
                 text += `  Total: ${processedTotal}\n`;
             } else text += `  No data yet\n`;
 
-            text += `\nâœˆï¸ DEPARTED: ${shiftLoads.length} loads\n`;
+            text += `\n✈️ DEPARTED: ${shiftLoads.length} loads\n`;
             for (const [eq, n] of Object.entries(departedByEquip)) text += `  ${eq}: ${n}\n`;
 
-            text += `\nðŸ“¦ REMAINING: ${remaining.length} containers Â· ${remainPkgs} packages\n`;
+            text += `\n📦 REMAINING: ${remaining.length} containers · ${remainPkgs} packages\n`;
             for (const [t, n] of Object.entries(remainTypes)) text += `  ${(TS[t] || t).replace(/^[^\s]+\s/, '')}: ${n}\n`;
 
-            text += `\nðŸ“ BY LOCATION:\n`;
+            text += `\n📍 BY LOCATION:\n`;
             for (const [loc, d] of remainLocs) {
                 const types = Object.entries(d.types).map(([t, n]) => `${n}${(TS[t] || t).replace(/^[^\s]+\s/, '')[0]}`).join(' ');
                 const routes = Object.entries(d.routes).sort((a, b) => b[1] - a[1]).slice(0, 3).map(([r]) => r).join(', ');
-                text += `  ${loc}: ${d.total} cnt Â· ${d.pkgs} pkg Â· ${d.maxDwell}m dwell Â· ${routes}\n`;
+                text += `  ${loc}: ${d.total} cnt · ${d.pkgs} pkg · ${d.maxDwell}m dwell · ${routes}\n`;
             }
 
             if (fieldTrailers.length) {
-                text += `\nðŸ—ï¸ AWAITING UNLOAD ON FIELDS (${fieldTrailers.length}):\n`;
+                text += `\n🏗️ AWAITING UNLOAD ON FIELDS (${fieldTrailers.length}):\n`;
                 for (const [type, trailers] of Object.entries(fieldByType).sort((a, b) => b[1].length - a[1].length)) {
                     const typeLabel = (TS[type] || type).replace(/^[^\s]+\s/, '');
                     text += `  ${typeLabel} (${trailers.length}):\n`;
                     for (const ft of trailers) {
                         const vtStr = Object.entries(ft.vistaTypes).map(([t, n]) => `${n}${(TS[t] || t).replace(/^[^\s]+\s/, '')[0]}`).join('+');
-                        text += `    ${ft.location}: ${ft.type} Â· ${ft.owner} Â· ${ft.vrId || 'â€”'} Â· ${ft.route || 'â€”'} Â· ${vtStr || 'â€”'} cnt Â· ${ft.status}\n`;
+                        text += `    ${ft.location}: ${ft.type} · ${ft.owner} · ${ft.vrId || '—'} · ${ft.route || '—'} · ${vtStr || '—'} cnt · ${ft.status}\n`;
                     }
                 }
             }
 
             if (ymsTrailers.length) {
-                text += `\nðŸš› TRAILERS WITH LOADS (${ymsTrailers.length}):\n`;
-                for (const t of ymsTrailers) text += `  ${t.location}: ${t.type} Â· ${t.owner} Â· ${t.vrId || 'â€”'} Â· ${t.status}\n`;
+                text += `\n🚛 TRAILERS WITH LOADS (${ymsTrailers.length}):\n`;
+                for (const t of ymsTrailers) text += `  ${t.location}: ${t.type} · ${t.owner} · ${t.vrId || '—'} · ${t.status}\n`;
             }
 
-            text += `\n${'â•'.repeat(50)}\n${new Date().toLocaleString()} Â· Ship Map v3.4.0`;
+            text += `\n${'═'.repeat(50)}\n${new Date().toLocaleString()} · Ship Map v3.4.0`;
 
             navigator.clipboard.writeText(text).then(() => {
                 const btn = document.getElementById('handover-copy');
-                btn.textContent = 'âœ… Copied!';
-                setTimeout(() => { btn.textContent = 'ðŸ“‹ Copy'; }, 2000);
+                btn.textContent = '✅ Copied!';
+                setTimeout(() => { btn.textContent = '📋 Copy'; }, 2000);
             });
         };
 
@@ -4812,7 +4926,7 @@ ${ymsTrailers.length ? `<div class="handover-section">
         for (var yi = 0; yi < ymsRows.length; yi++) {
             var r = ymsRows[yi];
             var sc = stColor[r.status] || '#5a6a7a';
-            var eqShort = r.eqType ? equipTypeShort(r.eqType) : '';
+            var eqShort = r.eqType ? equipTypeShort(r.eqType, r.vrId) : '';
             ymsTableRows += '<tr class="' + (r.matched ? 'debug-matched' : 'debug-unmatched') + '" style="' + (!r.matched ? 'background:rgba(255,82,82,0.08)' : '') + '">'
                 + '<td style="font-family:monospace;font-weight:bold;font-size:11px;color:' + (r.matched ? '#e0e0e0' : '#ff5252') + ';white-space:nowrap">' + r.code + '</td>'
                 + '<td>' + (r.matched ? '<span style="color:#69f0ae">\u2705</span> <span style="font-size:9px;color:#8899aa">' + r.elNames + '</span>' : '<span style="color:#ff5252">\u274C</span>') + '</td>'
@@ -4904,9 +5018,9 @@ ${ymsTrailers.length ? `<div class="handover-section">
         document.addEventListener('keydown', escH);
     },
 
-    // â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
+    // ═══════════════════════════════════════════════════
     // MAP MANAGER OVERLAY
-    // â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
+    // ═══════════════════════════════════════════════════
 
     openMapsMenu() {
         document.getElementById('maps-overlay')?.remove();
@@ -4917,8 +5031,8 @@ ${ymsTrailers.length ? `<div class="handover-section">
 
         overlay.innerHTML = `<div class="maps-panel">
             <div class="maps-hdr">
-                <h2>ðŸ—ºï¸ Map Manager</h2>
-                <button class="summary-close" id="maps-close">âœ•</button>
+                <h2>🗺️ Map Manager</h2>
+                <button class="summary-close" id="maps-close">✕</button>
             </div>
             <div class="maps-body">
 
@@ -4927,15 +5041,15 @@ ${ymsTrailers.length ? `<div class="handover-section">
                     <div class="maps-current">
                         <span class="maps-current-site">${CONFIG.warehouseId}</span>
                         <div>
-                            <div class="maps-current-info">ðŸ“¦ ${State.elements.length} elements</div>
-                            <div class="maps-current-info">ðŸ’¾ Local storage</div>
+                            <div class="maps-current-info">📦 ${State.elements.length} elements</div>
+                            <div class="maps-current-info">💾 Local storage</div>
                         </div>
                     </div>
                 </div>
 
                 <!-- GitHub download -->
                 <div class="maps-section">
-                    <h3>ðŸ“¥ Download from GitHub</h3>
+                    <h3>📥 Download from GitHub</h3>
                     <div style="font-size:10px;color:#5a6a7a;margin-bottom:8px">
                         Fetch <code style="color:#4fc3f7">shipmap_{SITE}.json</code> from
                         <a href="https://github.com/homziukl/Ship-Map-Builder" target="_blank" style="color:#42a5f5">repo</a>
@@ -4945,27 +5059,27 @@ ${ymsTrailers.length ? `<div class="handover-section">
                         <input class="maps-gh-input" id="maps-gh-site" value="${CONFIG.warehouseId}"
                                maxlength="8" spellcheck="false" placeholder="SITE">
                         <span style="font-size:12px;color:#8899aa">.json</span>
-                        <button class="btn" id="maps-gh-fetch" style="white-space:nowrap">ðŸ“¥ Fetch</button>
+                        <button class="btn" id="maps-gh-fetch" style="white-space:nowrap">📥 Fetch</button>
                     </div>
                     <div class="maps-status" id="maps-gh-status"></div>
                     <div class="maps-preview" id="maps-gh-preview">
-                        <div style="font-size:10px;color:#ff9900;font-weight:bold;margin-bottom:6px">ðŸ“‹ Preview</div>
+                        <div style="font-size:10px;color:#ff9900;font-weight:bold;margin-bottom:6px">📋 Preview</div>
                         <div id="maps-gh-preview-info"></div>
                         <div class="maps-preview-actions">
-                            <button class="btn green" id="maps-gh-apply-replace">ðŸ”„ Replace current</button>
-                            <button class="btn cyan" id="maps-gh-apply-merge">ðŸ“¥+ Merge</button>
+                            <button class="btn green" id="maps-gh-apply-replace">🔄 Replace current</button>
+                            <button class="btn cyan" id="maps-gh-apply-merge">📥+ Merge</button>
                         </div>
                     </div>
                 </div>
 
                 <!-- Saved snapshots -->
                 <div class="maps-section">
-                    <h3>ðŸ’¾ Saved Maps <span style="font-size:9px;color:#5a6a7a;font-weight:normal">(local snapshots)</span></h3>
+                    <h3>💾 Saved Maps <span style="font-size:9px;color:#5a6a7a;font-weight:normal">(local snapshots)</span></h3>
                     <div id="maps-snap-list"></div>
                     <div class="maps-save-row">
                         <input class="maps-save-input" id="maps-save-label"
-                               placeholder="${CONFIG.warehouseId} â€” ${new Date().toLocaleDateString()}" spellcheck="false">
-                        <button class="btn green" id="maps-save-btn">ðŸ’¾ Save</button>
+                               placeholder="${CONFIG.warehouseId} — ${new Date().toLocaleDateString()}" spellcheck="false">
+                        <button class="btn green" id="maps-save-btn">💾 Save</button>
                     </div>
                 </div>
 
@@ -4978,14 +5092,14 @@ ${ymsTrailers.length ? `<div class="handover-section">
 
         document.body.appendChild(overlay);
 
-        // â”€â”€ State â”€â”€
+        // ── State ──
         let fetchedData = null;
 
-        // â”€â”€ Close â”€â”€
+        // ── Close ──
         document.getElementById('maps-close').onclick = () => overlay.remove();
         overlay.addEventListener('click', (e) => { if (e.target === overlay) overlay.remove(); });
 
-        // â”€â”€ Prevent keyboard propagation â”€â”€
+        // ── Prevent keyboard propagation ──
         overlay.querySelectorAll('input').forEach(inp => {
             inp.addEventListener('keydown', (e) => {
                 e.stopPropagation();
@@ -4995,7 +5109,7 @@ ${ymsTrailers.length ? `<div class="handover-section">
             });
         });
 
-        // â”€â”€ GitHub Fetch â”€â”€
+        // ── GitHub Fetch ──
         const setStatus = (msg, cls) => {
             const el = document.getElementById('maps-gh-status');
             el.textContent = msg;
@@ -5011,14 +5125,14 @@ ${ymsTrailers.length ? `<div class="handover-section">
             const elCount = data.elements?.length || 0;
             const typeCount = data.types ? Object.keys(data.types).length : 0;
             const hasBg = !!data.bgUrl;
-            const exportedAt = data.exportedAt ? new Date(data.exportedAt).toLocaleString() : 'â€”';
+            const exportedAt = data.exportedAt ? new Date(data.exportedAt).toLocaleString() : '—';
             const version = data.version || '?';
 
             info.innerHTML = `
                 <div class="maps-preview-row"><span>Site</span><b>${data.warehouse || site}</b></div>
                 <div class="maps-preview-row"><span>Elements</span><b>${elCount}</b></div>
                 <div class="maps-preview-row"><span>Types</span><b>${typeCount}</b></div>
-                <div class="maps-preview-row"><span>BG image</span><b>${hasBg ? 'âœ… Yes' : 'â€”'}</b></div>
+                <div class="maps-preview-row"><span>BG image</span><b>${hasBg ? '✅ Yes' : '—'}</b></div>
                 <div class="maps-preview-row"><span>Exported</span><b>${exportedAt}</b></div>
                 <div class="maps-preview-row"><span>Version</span><b>${version}</b></div>
             `;
@@ -5032,10 +5146,10 @@ ${ymsTrailers.length ? `<div class="handover-section">
 
         document.getElementById('maps-gh-fetch').addEventListener('click', async () => {
             const site = document.getElementById('maps-gh-site').value.trim().toUpperCase();
-            if (!site || site.length < 2) { setStatus('âš ï¸ Enter a valid site code', 'err'); return; }
+            if (!site || site.length < 2) { setStatus('⚠️ Enter a valid site code', 'err'); return; }
 
             hidePreview();
-            setStatus('â³ Fetching...', 'loading');
+            setStatus('⏳ Fetching...', 'loading');
             document.getElementById('maps-gh-fetch').disabled = true;
 
             try {
@@ -5044,21 +5158,21 @@ ${ymsTrailers.length ? `<div class="handover-section">
 
                 const elCount = data.elements?.length || 0;
                 if (!elCount) {
-                    setStatus(`âš ï¸ File found but contains 0 elements`, 'err');
+                    setStatus(`⚠️ File found but contains 0 elements`, 'err');
                     hidePreview();
                 } else {
-                    setStatus(`âœ… Found: ${elCount} elements`, 'ok');
+                    setStatus(`✅ Found: ${elCount} elements`, 'ok');
                     showPreview(data, site);
                 }
             } catch (err) {
-                setStatus(`âŒ ${err.message}`, 'err');
+                setStatus(`❌ ${err.message}`, 'err');
                 hidePreview();
             } finally {
                 document.getElementById('maps-gh-fetch').disabled = false;
             }
         });
 
-        // â”€â”€ Apply: Replace â”€â”€
+        // ── Apply: Replace ──
         document.getElementById('maps-gh-apply-replace').addEventListener('click', () => {
             if (!fetchedData) return;
 
@@ -5069,49 +5183,49 @@ ${ymsTrailers.length ? `<div class="handover-section">
 
             const ok = MapManager.applyGitHubMap(fetchedData, 'replace');
             if (ok) {
-                UI.setStatus(`âœ… Map replaced: ${State.elements.length} elements from GitHub`);
+                UI.setStatus(`✅ Map replaced: ${State.elements.length} elements from GitHub`);
                 UI._initLegend();
                 UI._initType();
                 UI.refreshList();
                 R.render();
-                setStatus(`âœ… Applied! ${State.elements.length} elements loaded`, 'ok');
+                setStatus(`✅ Applied! ${State.elements.length} elements loaded`, 'ok');
                 hidePreview();
                 this._renderSnapList();
             } else {
-                setStatus('âŒ Failed to apply map', 'err');
+                setStatus('❌ Failed to apply map', 'err');
             }
         });
 
-        // â”€â”€ Apply: Merge â”€â”€
+        // ── Apply: Merge ──
         document.getElementById('maps-gh-apply-merge').addEventListener('click', () => {
             if (!fetchedData) return;
 
             const result = MapManager.applyGitHubMap(fetchedData, 'merge');
             if (result) {
-                UI.setStatus(`âœ… Merged: +${result.added} elements (${result.skipped} skipped)`);
+                UI.setStatus(`✅ Merged: +${result.added} elements (${result.skipped} skipped)`);
                 UI._initLegend();
                 UI._initType();
                 UI.refreshList();
                 R.render();
-                setStatus(`âœ… Merged! +${result.added} new, ${result.skipped} skipped`, 'ok');
+                setStatus(`✅ Merged! +${result.added} new, ${result.skipped} skipped`, 'ok');
                 hidePreview();
             } else {
-                setStatus('âŒ Failed to merge map', 'err');
+                setStatus('❌ Failed to merge map', 'err');
             }
         });
 
-        // â”€â”€ Save current â”€â”€
+        // ── Save current ──
         document.getElementById('maps-save-btn').addEventListener('click', () => {
             const label = document.getElementById('maps-save-label').value.trim() ||
-                          `${CONFIG.warehouseId} â€” ${new Date().toLocaleString()}`;
+                          `${CONFIG.warehouseId} — ${new Date().toLocaleString()}`;
 
             const meta = MapManager.saveCurrent(label);
             document.getElementById('maps-save-label').value = '';
-            UI.setStatus(`ðŸ’¾ Map saved: "${meta.label}"`);
+            UI.setStatus(`💾 Map saved: "${meta.label}"`);
             this._renderSnapList();
         });
 
-        // â”€â”€ Render snapshot list â”€â”€
+        // ── Render snapshot list ──
         this._renderSnapList();
     },
 
@@ -5122,34 +5236,34 @@ ${ymsTrailers.length ? `<div class="handover-section">
         const list = MapManager.getList();
 
         if (!list.length) {
-            container.innerHTML = '<div class="maps-empty">No saved maps yet â€” click ðŸ’¾ Save</div>';
+            container.innerHTML = '<div class="maps-empty">No saved maps yet — click 💾 Save</div>';
             return;
         }
 
         container.innerHTML = list.map((m, idx) => {
             const date = m.savedAt ? new Date(m.savedAt) : null;
-            const dateStr = date ? `${date.getDate().toString().padStart(2,'0')}/${(date.getMonth()+1).toString().padStart(2,'0')} ${date.getHours().toString().padStart(2,'0')}:${date.getMinutes().toString().padStart(2,'0')}` : 'â€”';
+            const dateStr = date ? `${date.getDate().toString().padStart(2,'0')}/${(date.getMonth()+1).toString().padStart(2,'0')} ${date.getHours().toString().padStart(2,'0')}:${date.getMinutes().toString().padStart(2,'0')}` : '—';
             const isAutoBackup = m.label.startsWith('Auto-backup');
 
             return `<div class="maps-snap-item" data-snap-idx="${idx}">
-                <span class="maps-snap-icon">${isAutoBackup ? 'ðŸ”„' : 'ðŸ—ºï¸'}</span>
+                <span class="maps-snap-icon">${isAutoBackup ? '🔄' : '🗺️'}</span>
                 <div class="maps-snap-info">
                     <div class="maps-snap-label" title="${m.label}">${m.label}</div>
                     <div class="maps-snap-meta">
-                        <span>ðŸ“¦ ${m.elementCount || '?'} el</span>
-                        <span>ðŸ¢ ${m.site || '?'}</span>
-                        <span>ðŸ“… ${dateStr}</span>
+                        <span>📦 ${m.elementCount || '?'} el</span>
+                        <span>🏢 ${m.site || '?'}</span>
+                        <span>📅 ${dateStr}</span>
                     </div>
                 </div>
                 <div class="maps-snap-actions">
-                    <button class="btn sm green" data-snap-load="${m.key}" title="Load this map">ðŸ“‚</button>
-                    <button class="btn sm" data-snap-export="${m.key}" title="Export as file">ðŸ“¤</button>
-                    <button class="btn sm del" data-snap-del="${m.key}" title="Delete">âœ•</button>
+                    <button class="btn sm green" data-snap-load="${m.key}" title="Load this map">📂</button>
+                    <button class="btn sm" data-snap-export="${m.key}" title="Export as file">📤</button>
+                    <button class="btn sm del" data-snap-del="${m.key}" title="Delete">✕</button>
                 </div>
             </div>`;
         }).join('');
 
-        // â”€â”€ Load â”€â”€
+        // ── Load ──
         container.querySelectorAll('[data-snap-load]').forEach(btn => {
             btn.addEventListener('click', (e) => {
                 e.stopPropagation();
@@ -5163,7 +5277,7 @@ ${ymsTrailers.length ? `<div class="handover-section">
 
                 const ok = MapManager.loadSaved(key);
                 if (ok) {
-                    UI.setStatus(`âœ… Loaded: "${meta?.label}"`);
+                    UI.setStatus(`✅ Loaded: "${meta?.label}"`);
                     UI._initLegend();
                     UI._initType();
                     UI.refreshList();
@@ -5174,14 +5288,14 @@ ${ymsTrailers.length ? `<div class="handover-section">
                     const currentSite = document.querySelector('.maps-current-site');
                     const currentInfo = document.querySelector('.maps-current-info');
                     if (currentSite) currentSite.textContent = CONFIG.warehouseId;
-                    if (currentInfo) currentInfo.textContent = `ðŸ“¦ ${State.elements.length} elements`;
+                    if (currentInfo) currentInfo.textContent = `📦 ${State.elements.length} elements`;
                 } else {
-                    UI.setStatus('âŒ Failed to load map');
+                    UI.setStatus('❌ Failed to load map');
                 }
             });
         });
 
-        // â”€â”€ Export â”€â”€
+        // ── Export ──
         container.querySelectorAll('[data-snap-export]').forEach(btn => {
             btn.addEventListener('click', (e) => {
                 e.stopPropagation();
@@ -5197,7 +5311,7 @@ ${ymsTrailers.length ? `<div class="handover-section">
             });
         });
 
-        // â”€â”€ Delete â”€â”€
+        // ── Delete ──
         container.querySelectorAll('[data-snap-del]').forEach(btn => {
             btn.addEventListener('click', (e) => {
                 e.stopPropagation();
@@ -5206,7 +5320,7 @@ ${ymsTrailers.length ? `<div class="handover-section">
                 if (!confirm(`Delete "${meta?.label}"?`)) return;
                 MapManager.deleteSaved(key);
                 this._renderSnapList();
-                UI.setStatus(`ðŸ—‘ï¸ Deleted: "${meta?.label}"`);
+                UI.setStatus(`🗑️ Deleted: "${meta?.label}"`);
             });
         });
     },
@@ -5265,7 +5379,7 @@ printStages() {
     const vistaGrandTotal = {}; let vistaGrandCnt = 0, vistaGrandPkgs = 0;
     for (const [, vd] of vistaLocs) { vistaGrandCnt += vd.total; vistaGrandPkgs += vd.totalPkgs; for (const [t, n] of Object.entries(vd.types)) vistaGrandTotal[t] = (vistaGrandTotal[t] || 0) + n; }
 
-    if (!sspRows.length && !vistaLocs.length) { UI.setStatus('âš ï¸ No stage locations found'); return; }
+    if (!sspRows.length && !vistaLocs.length) { UI.setStatus('⚠️ No stage locations found'); return; }
 
     const sspGrandCnt = Object.values(sspGrandTotal).reduce((s, n) => s + n, 0);
     const sspGrandStr = Object.entries(sspGrandTotal).map(([t, n]) => `${n}&times; ${TS[t] || t}`).join(', ');
@@ -5291,7 +5405,7 @@ printStages() {
 
     const html = `<!DOCTYPE html><html><head><meta charset="utf-8"><title>Stages - ${load.route}</title><style>*{margin:0;padding:0;box-sizing:border-box}body{font-family:'Segoe UI',Arial,sans-serif;padding:24px;color:#222;max-width:900px;margin:0 auto}h1{font-size:20px;margin-bottom:4px}h2{font-size:15px;margin:20px 0 8px;padding-top:12px;border-top:2px solid #333;display:flex;align-items:center;gap:8px}h2 .badge{background:#ff9900;color:#000;font-size:11px;padding:2px 8px;border-radius:10px}.meta{font-size:11px;color:#555;margin-bottom:16px;display:flex;gap:12px;flex-wrap:wrap}.meta span{white-space:nowrap}.meta b{color:#222}table{width:100%;border-collapse:collapse;margin-bottom:12px}th{text-align:left;padding:8px 12px;border-bottom:2px solid #333;font-size:11px;text-transform:uppercase;color:#555;letter-spacing:.5px}td{padding:6px 12px;border-bottom:1px solid #ddd;font-size:13px}.loc{font-weight:bold;font-family:'Consolas',monospace;white-space:nowrap}.routes{font-size:11px;color:#666}.pkg-count{text-align:center;color:#555}.dwell{font-family:monospace;font-size:11px;color:#888;text-align:center}.dwell-warn{color:#d32f2f;font-weight:bold}.total td{border-top:2px solid #333;font-weight:bold;padding:8px 12px}.cpt-tag{display:inline-block;padding:1px 6px;border-radius:3px;font-size:9px;font-weight:bold;background:#fff3e0;color:#e65100;margin:1px;white-space:nowrap}.cpt-col{font-size:10px}.vista-note{font-size:10px;color:#888;font-style:italic;margin-bottom:8px}.footer{font-size:9px;color:#999;margin-top:16px;border-top:1px solid #ddd;padding-top:6px;display:flex;justify-content:space-between}.no-print{margin-top:16px}@media print{.no-print{display:none!important}body{padding:12px}h2{page-break-before:avoid}}</style></head><body>
 <h1>&#x1F4E6; ${load.route} &mdash; Stages</h1>
-<div class="meta"><span>&#x1F69B; <b>${load.vrId || '&mdash;'}</b></span><span>${load.status.replace(/_/g, ' ')}</span><span>&#x1F6AA; <b>${load.dockDoor !== 'â€”' ? load.dockDoor : '&mdash;'}</b></span><span>SDT: <b>${load.sdt !== 'â€”' ? load.sdt : '&mdash;'}</b></span><span>${ymsInfo}</span><span>${shift.label} ${fmtTime(shift.startDate)}&rarr;${fmtTime(shift.endDate)}</span></div>
+<div class="meta"><span>&#x1F69B; <b>${load.vrId || '&mdash;'}</b></span><span>${load.status.replace(/_/g, ' ')}</span><span>&#x1F6AA; <b>${load.dockDoor !== '—' ? load.dockDoor : '&mdash;'}</b></span><span>SDT: <b>${load.sdt !== '—' ? load.sdt : '&mdash;'}</b></span><span>${ymsInfo}</span><span>${shift.label} ${fmtTime(shift.startDate)}&rarr;${fmtTime(shift.endDate)}</span></div>
 ${sspRows.length ? `<h2>&#x1F4CB; This load (SSP)</h2><table><thead><tr><th>Location</th><th>Containers</th><th>Routes</th></tr></thead><tbody>${sspTableRows}<tr class="total"><td>TOTAL</td><td>${sspGrandCnt} (${sspGrandStr})</td><td>${sspRows.length} locations</td></tr></tbody></table>` : '<p style="color:#888;font-style:italic;margin:12px 0">No staged containers for this load</p>'}
 ${vistaLocs.length ? `<h2>&#x1F4E6; Other CPTs for ${load.route} (Vista) <span class="badge">${vistaGrandCnt} cnt</span></h2><div class="vista-note">Containers from other CPTs currently on stage locations (excluding this load)</div><table><thead><tr><th>Location</th><th>Containers</th><th>Packages</th><th>Max Dwell</th><th>CPTs</th></tr></thead><tbody>${vistaTableRows}<tr class="total"><td>TOTAL</td><td>${vistaGrandCnt} (${vistaGrandStr})</td><td class="pkg-count">${vistaGrandPkgs}</td><td></td><td></td></tr></tbody></table>` : ''}
 <div class="footer"><span>${CONFIG.warehouseId} &middot; ${now.toLocaleString()} &middot; Ship Map v3.4.0</span></div>
@@ -5343,25 +5457,25 @@ ${vistaLocs.length ? `<h2>&#x1F4E6; Other CPTs for ${load.route} (Vista) <span c
         if (State.dashboardMode && this._sbVisible) {
             sb.style.right = '0'; sb.style.width = dw + 'px'; sb.style.zIndex = '100';
             sb.style.boxShadow = '-4px 0 20px rgba(0,0,0,0.6)'; cvs.style.marginRight = '0';
-            btn.textContent = 'âœ•';
+            btn.textContent = '✕';
             btn.setAttribute('style', `position:absolute;z-index:101;right:12px;top:12px;width:44px;height:44px;border-radius:50%;border:2px solid rgba(255,255,255,0.15);box-shadow:0 2px 12px rgba(0,0,0,0.5);font-size:20px;background:#ff9900;color:#000;cursor:pointer;display:flex;align-items:center;justify-content:center;user-select:none;padding:0`);
             if (drawer) drawer.style.right = '0';
         } else if (State.dashboardMode && !this._sbVisible) {
             sb.style.right = -dw + 'px'; sb.style.width = dw + 'px'; sb.style.zIndex = '60';
             sb.style.boxShadow = 'none'; cvs.style.marginRight = '0';
-            btn.textContent = 'ðŸ“‹';
+            btn.textContent = '📋';
             btn.setAttribute('style', `position:absolute;z-index:91;right:12px;top:12px;width:44px;height:44px;border-radius:50%;border:2px solid rgba(255,255,255,0.15);box-shadow:0 2px 12px rgba(0,0,0,0.5);font-size:20px;background:#232f3e;color:#ff9900;cursor:pointer;display:flex;align-items:center;justify-content:center;user-select:none;padding:0`);
             if (drawer) drawer.style.right = '0';
         } else if (!State.dashboardMode && this._sbVisible) {
             sb.style.right = '0'; sb.style.width = w + 'px'; sb.style.zIndex = '60';
             sb.style.boxShadow = 'none'; cvs.style.marginRight = w + 'px';
-            btn.textContent = 'â—€';
+            btn.textContent = '◀';
             btn.setAttribute('style', `position:absolute;z-index:91;right:${w}px;top:50%;transform:translateY(-50%);width:24px;height:52px;border-radius:6px 0 0 6px;border:1px solid #3a4a5a;border-right:none;background:#232f3e;color:#ff9900;font-size:13px;cursor:pointer;display:flex;align-items:center;justify-content:center;user-select:none;padding:0`);
             if (drawer) drawer.style.right = w + 'px';
         } else {
             sb.style.right = -w + 'px'; sb.style.width = w + 'px'; sb.style.zIndex = '60';
             sb.style.boxShadow = 'none'; cvs.style.marginRight = '0';
-            btn.textContent = 'â–¶';
+            btn.textContent = '▶';
             btn.setAttribute('style', `position:absolute;z-index:91;right:0;top:50%;transform:translateY(-50%);width:24px;height:52px;border-radius:0 6px 6px 0;border:1px solid #3a4a5a;border-left:none;background:#232f3e;color:#ff9900;font-size:13px;cursor:pointer;display:flex;align-items:center;justify-content:center;user-select:none;padding:0`);
             if (drawer) drawer.style.right = '0';
         }
@@ -5374,14 +5488,14 @@ ${vistaLocs.length ? `<h2>&#x1F4E6; Other CPTs for ${load.route} (Vista) <span c
         if (State.dashboardMode) {
             app.classList.add('dashboard-mode');
             dashBtn.classList.add('on');
-            dashBtn.textContent = 'ðŸ“º Exit';
+            dashBtn.textContent = '📺 Exit';
             try { document.documentElement.requestFullscreen?.(); } catch (e) { console.debug('[ShipMap] fullscreen:', e.message); }
             this.updateDashKpi();
             this._dashKpiTimer = setInterval(() => this.updateDashKpi(), 10000);
         } else {
             app.classList.remove('dashboard-mode');
             dashBtn.classList.remove('on');
-            dashBtn.textContent = 'ðŸ“º';
+            dashBtn.textContent = '📺';
             try { if (document.fullscreenElement) document.exitFullscreen?.(); } catch (e) { console.debug('[ShipMap] exitFullscreen:', e.message); }
             clearInterval(this._dashKpiTimer);
         }
@@ -5413,11 +5527,11 @@ ${vistaLocs.length ? `<h2>&#x1F4E6; Other CPTs for ${load.route} (Vista) <span c
 <div class="dash-kpi-sep"></div>
 <div class="dash-kpi"><span class="dash-kpi-val" style="color:${ymsUtil>85?'#ff1744':ymsUtil>65?'#ff9100':'#69f0ae'}">${ymsUtil}%</span><span class="dash-kpi-label">Yard</span></div>
 <div class="dash-kpi-sep"></div>
-<div class="dash-kpi"><span class="dash-kpi-val" style="color:#4fc3f7">${vStacked}</span><span class="dash-kpi-label">ðŸ“¥Stack</span></div>
-<div class="dash-kpi"><span class="dash-kpi-val" style="color:#ffd600">${vStaged}</span><span class="dash-kpi-label">ðŸ“¤Stage</span></div>
-${criticalLocs > 0 ? `<div class="dash-kpi"><span class="dash-kpi-val" style="color:#ff1744">${criticalLocs}</span><span class="dash-kpi-label">ðŸ”´Crit</span></div>` : ''}
-${(() => { const cptUrgent = loads.filter(l => l.status !== 'DEPARTED' && l.status !== 'CANCELLED' && (() => { const c = cptCountdown(l.cpt); return c && (c.level === 'critical' || c.level === 'past'); })()).length; return cptUrgent > 0 ? `<div class="dash-kpi"><span class="dash-kpi-val" style="color:#ff1744">${cptUrgent}</span><span class="dash-kpi-label">â°CPT!</span></div>` : ''; })()}
-<span class="dash-time">â± ${remH}h${remM}m Â· ${fmtTime(now)}</span>`;
+<div class="dash-kpi"><span class="dash-kpi-val" style="color:#4fc3f7">${vStacked}</span><span class="dash-kpi-label">📥Stack</span></div>
+<div class="dash-kpi"><span class="dash-kpi-val" style="color:#ffd600">${vStaged}</span><span class="dash-kpi-label">📤Stage</span></div>
+${criticalLocs > 0 ? `<div class="dash-kpi"><span class="dash-kpi-val" style="color:#ff1744">${criticalLocs}</span><span class="dash-kpi-label">🔴Crit</span></div>` : ''}
+${(() => { const cptUrgent = loads.filter(l => l.status !== 'DEPARTED' && l.status !== 'CANCELLED' && (() => { const c = cptCountdown(l.cpt); return c && (c.level === 'critical' || c.level === 'past'); })()).length; return cptUrgent > 0 ? `<div class="dash-kpi"><span class="dash-kpi-val" style="color:#ff1744">${cptUrgent}</span><span class="dash-kpi-label">⏰CPT!</span></div>` : ''; })()}
+<span class="dash-time">⏱ ${remH}h${remM}m · ${fmtTime(now)}</span>`;
     },
 
 
@@ -5443,18 +5557,18 @@ ${(() => { const cptUrgent = loads.filter(l => l.status !== 'DEPARTED' && l.stat
             + '<div id="bg-url-wrap" style="display:none;margin-top:4px"><div style="display:flex;gap:4px"><input id="bg-url-input" style="flex:1;background:#0d1b2a;color:#4fc3f7;border:1px solid #2a3a4a;padding:4px 8px;border-radius:4px;font-size:10px" placeholder="https://...image.png" spellcheck="false" value="' + (BgImage.bgUrl || '') + '"><button class="btn sm green" id="bg-url-apply">\u2713</button></div></div>'
             + (hasBg ? '<div style="margin-top:4px"><div style="display:flex;align-items:center;gap:6px;font-size:11px"><label style="color:#8899aa;font-size:10px;min-width:50px">Opacity</label><input type="range" id="bg-opacity" min="0.05" max="1" step="0.05" value="' + SiteSettings.bgOpacity + '" style="flex:1;accent-color:#ff9900"></div><div style="display:flex;align-items:center;gap:6px;font-size:11px;margin-top:4px"><label style="color:#8899aa;font-size:10px;min-width:50px">Scale</label><input type="range" id="bg-scale" min="0.05" max="10" step="0.05" value="' + SiteSettings.bgScale + '" style="flex:1;accent-color:#ff9900"></div></div>' : '')
             + '<div style="margin-top:8px;padding-top:8px;border-top:1px solid #2a3a4a">'
-+ '<h4 style="font-size:10px;color:#69f0ae;margin-bottom:6px;text-transform:uppercase">â˜ï¸ GitSync</h4>'
++ '<h4 style="font-size:10px;color:#69f0ae;margin-bottom:6px;text-transform:uppercase">☁️ GitSync</h4>'
 + '<div style="display:flex;gap:4px;margin-bottom:4px">'
-+ '<input id="gitsync-token" type="password" style="flex:1;background:#0d1b2a;color:#69f0ae;border:1px solid #2a3a4a;padding:4px 8px;border-radius:4px;font-size:10px;font-family:monospace" placeholder="ghp_..." value="' + (GitSync._getToken() ? 'â€¢â€¢â€¢â€¢â€¢â€¢â€¢â€¢â€¢â€¢' : '') + '" spellcheck="false">'
-+ '<button class="btn sm green" id="gitsync-save">âœ“</button>'
++ '<input id="gitsync-token" type="password" style="flex:1;background:#0d1b2a;color:#69f0ae;border:1px solid #2a3a4a;padding:4px 8px;border-radius:4px;font-size:10px;font-family:monospace" placeholder="ghp_..." value="' + (GitSync._getToken() ? '••••••••••' : '') + '" spellcheck="false">'
++ '<button class="btn sm green" id="gitsync-save">✓</button>'
 + '</div>'
 + '<div style="display:flex;gap:4px">'
-+ '<button class="btn sm cyan" id="gitsync-push">â˜ï¸ Push now</button>'
-+ '<button class="btn sm" id="gitsync-pull">ðŸ“¥ Pull</button>'
-+ (GitSync.enabled ? '<button class="btn sm del" id="gitsync-remove">âœ•</button>' : '')
++ '<button class="btn sm cyan" id="gitsync-push">☁️ Push now</button>'
++ '<button class="btn sm" id="gitsync-pull">📥 Pull</button>'
++ (GitSync.enabled ? '<button class="btn sm del" id="gitsync-remove">✕</button>' : '')
 + '</div>'
 + '<div style="font-size:9px;color:#5a6a7a;margin-top:4px">'
-+ (GitSync.enabled ? 'âœ… Auto-sync ON â€” pushes 10s after edits' : 'âŒ No token â€” edits stay local only')
++ (GitSync.enabled ? '✅ Auto-sync ON — pushes 10s after edits' : '❌ No token — edits stay local only')
 + '</div></div>'
 + '</div></div>';
         var self = this;
@@ -5472,15 +5586,15 @@ ${(() => { const cptUrgent = loads.filter(l => l.status !== 'DEPARTED' && l.stat
             var scSlider = document.getElementById('bg-scale'); if (scSlider) { scSlider.addEventListener('input', function(e) { SiteSettings.bgScale = parseFloat(e.target.value); R.render(); }); scSlider.addEventListener('change', function() { saveSiteSettings(); }); }
         }
         wrap.querySelectorAll('input[type="time"]').forEach(function(inp) { inp.addEventListener('keydown', function(e) { e.stopPropagation(); }); });
-// â”€â”€ GitSync bindings â”€â”€
+// ── GitSync bindings ──
 document.getElementById('gitsync-save')?.addEventListener('click', function() {
     var inp = document.getElementById('gitsync-token');
     var val = inp.value.trim();
-    if (val && !val.startsWith('â€¢')) {
+    if (val && !val.startsWith('•')) {
         GitSync.setToken(val);
-        inp.value = 'â€¢â€¢â€¢â€¢â€¢â€¢â€¢â€¢â€¢â€¢';
+        inp.value = '••••••••••';
         self._renderSettings();
-        UI.setStatus('â˜ï¸ GitSync token saved');
+        UI.setStatus('☁️ GitSync token saved');
     }
 });
 document.getElementById('gitsync-push')?.addEventListener('click', function() {
@@ -5492,14 +5606,14 @@ document.getElementById('gitsync-pull')?.addEventListener('click', function() {
 document.getElementById('gitsync-remove')?.addEventListener('click', function() {
     GitSync.removeToken();
     self._renderSettings();
-    UI.setStatus('â˜ï¸ GitSync disabled');
+    UI.setStatus('☁️ GitSync disabled');
 });
 document.getElementById('gitsync-token')?.addEventListener('keydown', function(e) {
     e.stopPropagation();
     if (e.key === 'Enter') document.getElementById('gitsync-save').click();
 });
 document.getElementById('gitsync-token')?.addEventListener('focus', function(e) {
-    if (e.target.value.startsWith('â€¢')) e.target.value = '';
+    if (e.target.value.startsWith('•')) e.target.value = '';
 });
 
     },
@@ -5549,7 +5663,7 @@ document.getElementById('gitsync-token')?.addEventListener('focus', function(e) 
 // GIT SYNC — source: git-sync.js
 // ============================================================
 ﻿// === GIT SYNC ===
-// GITSYNC â€” Auto-push map changes to GitHub
+// GITSYNC — Auto-push map changes to GitHub
 // ============================================================
 const GitSync = {
     _owner: 'homziukl',
@@ -5560,8 +5674,8 @@ const GitSync = {
     _debounceMs: 10000,
     _pushing: false,
     _lastPushHash: '',
-    _lastKnownCount: 0,     // â† TU â€” safety check for catastrophic loss
-    _backupKey: 'gitsync_last_backup',  // â† i ten teÅ¼ jeÅ›li dodajesz daily backup
+    _lastKnownCount: 0,     // ← TU — safety check for catastrophic loss
+    _backupKey: 'gitsync_last_backup',  // ← i ten też jeÅ›li dodajesz daily backup
     enabled: false,
 
     _getToken() { return GM_getValue('gitsync_pat', ''); },
@@ -5581,7 +5695,7 @@ const GitSync = {
         };
     },
 
-    // â”€â”€ Get current file SHA (needed for update) â”€â”€
+    // ── Get current file SHA (needed for update) ──
     async _getSha() {
         const path = this._filePath();
         const url = `${this._apiBase}/repos/${this._owner}/${this._repo}/contents/${path}?ref=${this._branch}`;
@@ -5597,7 +5711,7 @@ const GitSync = {
                             resolve(data.sha);
                         } catch { reject({ message: 'JSON parse error' }); }
                     } else if (r.status === 404) {
-                        resolve(null); // file doesn't exist yet â†’ create
+                        resolve(null); // file doesn't exist yet → create
                     } else {
                         reject({ message: `HTTP ${r.status}` });
                     }
@@ -5607,29 +5721,29 @@ const GitSync = {
         });
     },
 
-    // â”€â”€ Push file to GitHub â”€â”€
+    // ── Push file to GitHub ──
     async push(manual = false) {
         const token = this._getToken();
         if (!token) {
-            if (manual) UI.setStatus('âš ï¸ GitSync: no token â€” open Settings');
+            if (manual) UI.setStatus('⚠️ GitSync: no token — open Settings');
             return;
 
         }
         if (this._pushing) return;
-        // â”€â”€ Safety checks â”€â”€
+        // ── Safety checks ──
 const elCount = State.elements.length;
 
 // Never push empty map
 if (elCount === 0) {
-    if (manual) UI.setStatus('âš ï¸ GitSync: refusing to push empty map');
+    if (manual) UI.setStatus('⚠️ GitSync: refusing to push empty map');
     this._pushing = false;
     return;
 }
 
-// Catastrophic loss detection â€” if we had 50+ elements and now <10, block auto-push
+// Catastrophic loss detection — if we had 50+ elements and now <10, block auto-push
 if (!manual && this._lastKnownCount > 50 && elCount < this._lastKnownCount * 0.2) {
-    console.warn(`[ShipMap:GitSync] âš  Blocked auto-push: ${this._lastKnownCount} â†’ ${elCount} elements (>80% loss)`);
-    UI.setStatus(`âš ï¸ GitSync: blocked â€” ${this._lastKnownCount}â†’${elCount} elements. Manual push if intended.`);
+    console.warn(`[ShipMap:GitSync] ⚠ Blocked auto-push: ${this._lastKnownCount} → ${elCount} elements (>80% loss)`);
+    UI.setStatus(`⚠️ GitSync: blocked — ${this._lastKnownCount}→${elCount} elements. Manual push if intended.`);
     this._pushing = false;
     return;
 }
@@ -5648,7 +5762,7 @@ this._lastKnownCount = elCount;
                 return;
             }
 
-            UI.setStatus('â˜ï¸ GitSync: pushing...');
+            UI.setStatus('☁️ GitSync: pushing...');
 
             const sha = await this._getSha();
             const path = this._filePath();
@@ -5656,7 +5770,7 @@ this._lastKnownCount = elCount;
 
             const now = new Date();
             const timeStr = `${now.getHours().toString().padStart(2,'0')}:${now.getMinutes().toString().padStart(2,'0')}`;
-            const message = `ðŸš¢ ${CONFIG.warehouseId} â€” ${State.elements.length} elements â€” ${timeStr}`;
+            const message = `🚢 ${CONFIG.warehouseId} — ${State.elements.length} elements — ${timeStr}`;
 
             const body = {
                 message,
@@ -5675,11 +5789,11 @@ this._lastKnownCount = elCount;
                             try { resolve(JSON.parse(r.responseText)); }
                             catch { resolve({}); }
                         } else if (r.status === 409) {
-                            reject({ message: 'Conflict â€” someone else pushed. Refresh & retry.' });
+                            reject({ message: 'Conflict — someone else pushed. Refresh & retry.' });
                         } else if (r.status === 401 || r.status === 403) {
-                            reject({ message: 'Auth failed â€” check token permissions' });
+                            reject({ message: 'Auth failed — check token permissions' });
                         } else if (r.status === 422) {
-                            reject({ message: 'SHA mismatch â€” file changed. Retry...' });
+                            reject({ message: 'SHA mismatch — file changed. Retry...' });
                         } else {
                             reject({ message: `HTTP ${r.status}` });
                         }
@@ -5689,13 +5803,13 @@ this._lastKnownCount = elCount;
             });
 
             this._lastPushHash = hash;
-            const shortSha = result.content?.sha?.substring(0, 7) || 'âœ“';
-            UI.setStatus(`â˜ï¸ Synced â†’ ${shortSha} Â· ${State.elements.length} el`);
-            console.log(`[ShipMap:GitSync] âœ… Pushed ${path} (${shortSha})`);
+            const shortSha = result.content?.sha?.substring(0, 7) || '✓';
+            UI.setStatus(`☁️ Synced → ${shortSha} · ${State.elements.length} el`);
+            console.log(`[ShipMap:GitSync] ✅ Pushed ${path} (${shortSha})`);
 
         } catch (err) {
-            console.error(`[ShipMap:GitSync] âŒ ${err.message}`);
-            UI.setStatus(`âŒ GitSync: ${err.message}`);
+            console.error(`[ShipMap:GitSync] ❌ ${err.message}`);
+            UI.setStatus(`❌ GitSync: ${err.message}`);
 
             // Auto-retry on SHA mismatch (once)
             if (err.message?.includes('SHA mismatch') && !manual) {
@@ -5708,19 +5822,19 @@ this._lastKnownCount = elCount;
         this._pushing = false;
     },
 
-    // â”€â”€ Schedule push (debounced) â”€â”€
+    // ── Schedule push (debounced) ──
     schedulePush() {
         if (!this.enabled) return;
         clearTimeout(this._debounceTimer);
         this._debounceTimer = setTimeout(() => this.push(false), this._debounceMs);
     },
 
-    // â”€â”€ Pull latest from GitHub â”€â”€
+    // ── Pull latest from GitHub ──
     async pull() {
         const token = this._getToken();
-        if (!token) { UI.setStatus('âš ï¸ GitSync: no token'); return false; }
+        if (!token) { UI.setStatus('⚠️ GitSync: no token'); return false; }
 
-        UI.setStatus('â˜ï¸ GitSync: pulling...');
+        UI.setStatus('☁️ GitSync: pulling...');
 
         try {
             const path = this._filePath();
@@ -5747,18 +5861,18 @@ this._lastKnownCount = elCount;
             const content = decodeURIComponent(escape(atob(data.content.replace(/\n/g, ''))));
             const ok = State.importJSON(content);
             if (ok) {
-                UI.setStatus(`â˜ï¸ Pulled: ${State.elements.length} elements`);
+                UI.setStatus(`☁️ Pulled: ${State.elements.length} elements`);
                 UI._initLegend();
                 UI._initType();
                 UI.refreshList();
                 R.render();
                 return true;
             }
-            UI.setStatus('âŒ GitSync: invalid map data');
+            UI.setStatus('❌ GitSync: invalid map data');
             return false;
 
         } catch (err) {
-            UI.setStatus(`âŒ GitSync: ${err.message}`);
+            UI.setStatus(`❌ GitSync: ${err.message}`);
             return false;
         }
     },
@@ -5775,7 +5889,7 @@ this._lastKnownCount = elCount;
 // ============================================================
 ﻿// === APP ===
 // ============================================================
-// FMC SHELL â€” save site code + intercept for bonus data
+// FMC SHELL — save site code + intercept for bonus data
 // ============================================================
 if (/trans-logistics-eu\.amazon\.com\/fmc/i.test(location.href)) {
     const detectSite = () => {
@@ -5785,7 +5899,7 @@ if (/trans-logistics-eu\.amazon\.com\/fmc/i.test(location.href)) {
     const SITE = detectSite();
     if (SITE) {
         GM_setValue('shipmap_fmc_site_code', SITE);
-        console.log(`[ShipMap:FMC] ðŸ“‹ Site code saved: ${SITE}`);
+        console.log(`[ShipMap:FMC] 📋 Site code saved: ${SITE}`);
     }
     const origOpen = XMLHttpRequest.prototype.open;
     const origSend = XMLHttpRequest.prototype.send;
@@ -5819,7 +5933,7 @@ if (/trans-logistics-eu\.amazon\.com\/fmc/i.test(location.href)) {
         if (!document.body) return;
         const badge = document.createElement('div');
         badge.style.cssText = 'position:fixed;bottom:8px;right:8px;z-index:99999;background:rgba(22,33,62,0.92);color:#ff9900;padding:6px 14px;border-radius:8px;font:bold 11px "Amazon Ember",Arial,sans-serif;border:1px solid #ff9900;box-shadow:0 4px 12px rgba(0,0,0,0.4);';
-        badge.innerHTML = `ðŸš¢ ShipMap FMC | ${SITE || '?'} | synced âœ…`;
+        badge.innerHTML = `🚢 ShipMap FMC | ${SITE || '?'} | synced ✅`;
         document.body.appendChild(badge);
     };
     if (document.readyState === 'complete' || document.readyState === 'interactive') addBadge();
@@ -5834,14 +5948,14 @@ if (/trans-logistics-eu\.amazon\.com\/yms/i.test(location.href)) {
     const decodeJwtPayload = (tok) => { const b64 = tok.split('.')[1].replace(/-/g, '+').replace(/_/g, '/'); return JSON.parse(atob(b64)); };
     const validateToken = (tok) => { try { const p = decodeJwtPayload(tok); if (p.iss !== 'YMS-1.0') return null; const nowSec = Date.now() / 1000; if (!p.exp || p.exp < nowSec + 60) return null; if (p.nbf && p.nbf > nowSec + 5) return null; const yard = p.context?.yard?.toUpperCase(); if (!yard || yard.length < 3) return null; return { yard, exp: p.exp, accountId: p.context.accountId, user: p.context.userName }; } catch { return null; } };
     const extractToken = () => { const scripts = document.querySelectorAll('script'); for (const s of scripts) { const m = (s.textContent || '').match(/ymsSecurityToken\s*=\s*["']?(eyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+)["']?/); if (m) return m[1]; } for (const s of scripts) { const m2 = (s.textContent || '').match(/["']token["']\s*:\s*["'](eyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+)["']/); if (m2) return m2[1]; } const m3 = document.documentElement.innerHTML.match(/eyJhbGciOi[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+/); return m3 ? m3[0] : null; };
-    const capture = () => { const tok = extractToken(); if (!tok) return; const info = validateToken(tok); if (!info) return; const siteKey = `yms_token_${info.yard}`; const existing = GM_getValue(siteKey, null); if (existing === tok) return; GM_setValue(siteKey, tok); GM_setValue('yms_token', tok); console.log(`[ShipMap] âœ… Token captured â†’ ${siteKey} | yard=${info.yard}`); };
+    const capture = () => { const tok = extractToken(); if (!tok) return; const info = validateToken(tok); if (!info) return; const siteKey = `yms_token_${info.yard}`; const existing = GM_getValue(siteKey, null); if (existing === tok) return; GM_setValue(siteKey, tok); GM_setValue('yms_token', tok); console.log(`[ShipMap] ✅ Token captured → ${siteKey} | yard=${info.yard}`); };
     if (document.readyState === 'complete') capture();
     else window.addEventListener('load', capture);
     setInterval(capture, 30000);
     return;
 }
 
-// MAIN â€” bootstrap
+// MAIN — bootstrap
 // ============================================================
 function bootMain() {
     UI.init();
@@ -5849,7 +5963,7 @@ function bootMain() {
     R.init('cvs');
     R.render();
     UI.refreshList();
-    UI.setStatus(`âœ… v3.4.1 | ${State.elements.length} el | ${State.editMode ? 'ðŸ”“' : 'ðŸ”’'}`);
+    UI.setStatus(`✅ v3.5.1 | ${State.elements.length} el | ${State.editMode ? '🔓' : '🔒'}`);
     try { Minimap.init(); } catch(e) { console.warn('[Minimap] init failed:', e); }
     try { GitSync.init(); } catch(e) { console.warn('[GitSync] init failed:', e); }
 try { unsafeWindow.__SM = { State, YMS, FMC, Dockmaster, RELAT, MapManager, MatchIndex, ymsGetVrIds }; } catch(e) {}
