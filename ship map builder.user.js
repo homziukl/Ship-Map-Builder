@@ -259,7 +259,7 @@ const FOCUS_PALETTE = [
     '#6C5CE7', '#81ECEC', '#FDCB6E', '#E17055', '#00B894',
 ];
 
-function routeGroupKey(rawRoute) { let s = parseRoute(rawRoute, { stripSuffix: false }); s = s.replace(/-(?:VCRI|DDU|ND)$/i, ''); return s.toUpperCase(); }
+function routeGroupKey(rawRoute) { let s = parseRoute(rawRoute, { stripSuffix: false }); s = s.replace(/-(?:VCRI|DDU|ND|H\d)$/i, ''); return s.toUpperCase(); }
 function routeSubLabel(rawRoute) { const s = parseRoute(rawRoute, { stripSuffix: false }); const group = routeGroupKey(rawRoute); if (s.toUpperCase() === group) return null; const diff = s.toUpperCase().replace(group, '').replace(/^-/, ''); return diff || null; }
 function simplifyStackingFilter(sf) { let s = parseRoute(sf); if (/BAG/i.test(s)) s = s.replace(/^(.*BAG).*$/i, '$1'); return s; }
 
@@ -3340,16 +3340,29 @@ select.tsel{background:#37475a;color:#e0e0e0;border:1px solid #4a5a6a;padding:4p
     _getUpcomingRuns(vistaRouteKey) {
         if (!State.sspLoads.length) return [];
         var vk = vistaRouteKey.toUpperCase();
+        // Also build a normalized key (strip all suffixes) for flexible matching
+        var vkNorm = parseRoute(vk).toUpperCase();
         var now = Date.now();
         var matched = [];
         for (var i = 0; i < State.sspLoads.length; i++) {
             var ld = State.sspLoads[i];
             if (ld.status === 'DEPARTED' || ld.status === 'CANCELLED') continue;
-            // Match: routeGroupKey of SSP load matches Vista route key
+            // Match: compare both routeGroupKey AND normalized (suffix-stripped) route
             var ldRoutes = ld.route.split(/\s*\+\s*/);
+            // Also try rawRoute segments for matching
+            var ldRawRoutes = ld.rawRoute ? ld.rawRoute.split(/\s*\+\s*/) : [];
             var hit = false;
             for (var ri = 0; ri < ldRoutes.length; ri++) {
-                if (routeGroupKey(ldRoutes[ri]) === vk) { hit = true; break; }
+                var ldKey = routeGroupKey(ldRoutes[ri]);
+                var ldNorm = parseRoute(ldRoutes[ri]).toUpperCase();
+                if (ldKey === vk || ldNorm === vkNorm || ldKey === vkNorm || ldNorm === vk) { hit = true; break; }
+            }
+            if (!hit) {
+                for (var rri = 0; rri < ldRawRoutes.length; rri++) {
+                    var rawKey = routeGroupKey(ldRawRoutes[rri]);
+                    var rawNorm = parseRoute(ldRawRoutes[rri]).toUpperCase();
+                    if (rawKey === vk || rawNorm === vkNorm || rawKey === vkNorm || rawNorm === vk) { hit = true; break; }
+                }
             }
             if (!hit) continue;
             // Parse SDT for sorting
@@ -3364,8 +3377,8 @@ select.tsel{background:#37475a;color:#e0e0e0;border:1px solid #4a5a6a;padding:4p
             if (!b.sdtMs) return -1;
             return a.sdtMs - b.sdtMs;
         });
-        // Return max 5 closest runs
-        return matched.slice(0, 5);
+        // Return max 8 closest runs (increased to show more vehicle types)
+        return matched.slice(0, 8);
     },
 
     _renderRunBadges(vistaRouteKey) {
@@ -3408,9 +3421,28 @@ select.tsel{background:#37475a;color:#e0e0e0;border:1px solid #4a5a6a;padding:4p
     updateVistaRoutesPanel() {
         var list = document.getElementById('vista-routes-list');
         if (!list) return;
-        if (!State.vistaContainers.length) { list.innerHTML = '<div class="dp-empty">No data</div>'; return; }
+        if (!State.vistaContainers.length && !State.sspLoads.length) { list.innerHTML = '<div class="dp-empty">No data</div>'; return; }
 
         var routes = VISTA.buildRouteCongestion();
+        var vistaRouteKeys = {};
+        for (var vri = 0; vri < routes.length; vri++) vistaRouteKeys[routes[vri].key] = true;
+
+        // Collect SSP-only routes (no Vista containers) — 7.5t, Sprinters, Swaps etc.
+        var sspOnlyRoutes = {};
+        for (var si = 0; si < State.sspLoads.length; si++) {
+            var ld = State.sspLoads[si];
+            if (ld.status === 'DEPARTED' || ld.status === 'CANCELLED') continue;
+            var ldParts = ld.route.split(/\s*\+\s*/);
+            for (var pi = 0; pi < ldParts.length; pi++) {
+                var gk = routeGroupKey(ldParts[pi]);
+                if (!gk || vistaRouteKeys[gk]) continue;
+                if (!sspOnlyRoutes[gk]) sspOnlyRoutes[gk] = { key: gk, loads: [], eqTypes: {} };
+                sspOnlyRoutes[gk].loads.push(ld);
+                var eqShort = equipTypeShort(ld.equipmentType, ld.vrId, ld.subCarrier) || '?';
+                sspOnlyRoutes[gk].eqTypes[eqShort] = (sspOnlyRoutes[gk].eqTypes[eqShort] || 0) + 1;
+            }
+        }
+
         var filter = this._vistaSearch;
         var maxCnt = routes.length ? routes[0].totalContainers : 1;
         var html = '';
@@ -3461,6 +3493,30 @@ select.tsel{background:#37475a;color:#e0e0e0;border:1px solid #4a5a6a;padding:4p
                 + '<div class="fmc-tour-detail">' + locsHtml + '</div>'
                 + '</div>';
         }
+
+        // SSP-only routes (no Vista containers) — Sprinters, 7.5t, Swaps etc.
+        var sspKeys = Object.keys(sspOnlyRoutes).sort();
+        var sspFilteredOut = 0;
+        for (var ski = 0; ski < sspKeys.length; ski++) {
+            var sr = sspOnlyRoutes[sspKeys[ski]];
+            if (filter && !sr.key.includes(filter)) { sspFilteredOut++; continue; }
+            var eqBadges = '';
+            var eqEntries = Object.entries(sr.eqTypes);
+            var EQ_COLORS = {'7.5t':'#66bb6a','SPR':'#4fc3f7','1SW':'#e040fb','2SW':'#ce93d8','BOX':'#ffb74d','REF':'#80deea','3WH':'#ab47bc'};
+            for (var ei = 0; ei < eqEntries.length; ei++) {
+                var eqC = EQ_COLORS[eqEntries[ei][0]] || '#78909C';
+                eqBadges += '<span class="dr-badge" style="background:' + eqC + '22;color:' + eqC + ';border:1px solid ' + eqC + '44">' + eqEntries[ei][1] + '\u00D7' + eqEntries[ei][0] + '</span>';
+            }
+            html += '<div class="fmc-tour-item" data-vrkey="' + sr.key + '">'
+                + '<div class="fmc-tour-header">'
+                + '<span class="fmc-tour-route" style="opacity:0.7">' + sr.key + '</span>'
+                + '<span style="font-size:9px;color:#5a6a7a;min-width:40px;text-align:right">SSP only</span>'
+                + '</div>'
+                + '<div style="display:flex;gap:2px;flex-wrap:wrap;margin:2px 8px;font-size:9px">' + eqBadges + '</div>'
+                + this._renderRunBadges(sr.key)
+                + '</div>';
+        }
+        filteredOut += sspFilteredOut;
 
         if (filteredOut > 0) {
             html += '<div class="hidden-count">\uD83D\uDD0D ' + filteredOut + ' routes hidden</div>';
