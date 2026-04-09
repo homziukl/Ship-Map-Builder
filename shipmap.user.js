@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Ship Map Builder
 // @namespace    http://tampermonkey.net/
-// @version      3.5.0
+// @version      3.5.2
 // @description  Ship Map + SSP + YMS + Vista + FMC + STEM integration
 // @author       homziukl
 // @match        https://stem-eu.corp.amazon.com/url*
@@ -596,7 +596,7 @@ const SSP = {
         State.dataLoading = true; UI.updateDataPanel();
         try {
             const now = Date.now(), startDate = now - 24 * 3600000, endDate = now + 7 * 24 * 3600000;
-            const url = `${CONFIG.baseUrl}/ssp/dock/hrz/ob/fetchdata?entity=getOutboundDockView&nodeId=${CONFIG.warehouseId}&startDate=${startDate}&endDate=${endDate}&loadCategories=outboundScheduled,outboundInProgress,outboundReadyToDepart&shippingPurposeType=TRANSSHIPMENT,NON-TRANSSHIPMENT,SHIP_WITH_AMAZON`;
+            const url = `${CONFIG.baseUrl}/ssp/dock/hrz/ob/fetchdata?entity=getOutboundDockView&nodeId=${CONFIG.warehouseId}&startDate=${startDate}&endDate=${endDate}&loadCategories=outboundScheduled,outboundInProgress,outboundReadyToDepart,outboundDeparted,outboundCancelled&shippingPurposeType=TRANSSHIPMENT,NON-TRANSSHIPMENT,SHIP_WITH_AMAZON`;
             const data = await this._fetchJSON(url);
             const aaData = data?.ret?.aaData || [], allRows = [];
             for (const item of aaData) { const ld = item.load; if (!ld || !ld.route) continue; allRows.push({ route:this._parseRoute(ld.route), rawRoute:ld.route, vrId:ld.vrId, status:ld.status, statusLabel:this._statusLabel(ld.status), statusShort:this._statusShort(ld.status), statusColor:this._statusColor(ld.status), carrier:ld.carrier, subCarrier:ld.subCarrier||'', cpt:ld.criticalPullTime||'—', sdt:ld.scheduledDepartureTime||'—', dockDoor:item.resource?.[0]?.label||'—', trailer:item.trailer?.trailerNumber||'—', equipmentType:ld.equipmentType||'', loadGroupId:ld.loadGroupId, planId:ld.planId, trailerId:item.trailer?.trailerId||'', trailerNumber:item.trailer?.trailerNumber||'', facilityStatus:this._facilityStatus(ld.status), _expanded:false, _containers:null, _containersLoading:false }); }
@@ -3587,7 +3587,7 @@ select.tsel{background:#37475a;color:#e0e0e0;border:1px solid #4a5a6a;padding:4p
 
 
     _updateLoadsSubCounts() {
-        const obCount = State.sspLoads.filter(l => !FMC.isTransferTotes(l.vrId)).length;
+        const obCount = State.sspLoads.filter(l => !FMC.isTransferTotes(l.vrId) && l.status !== 'DEPARTED' && l.status !== 'CANCELLED').length;
         const fmcNonInvRaw = FMC.getNonInvTours();
         const fmcNonInvFiltered = fmcNonInvRaw.filter(t => !t.vrId || !RELAT.isCompleted(t.vrId));
         var ymsOrphanCount = 0;
@@ -3610,15 +3610,16 @@ select.tsel{background:#37475a;color:#e0e0e0;border:1px solid #4a5a6a;padding:4p
         if (State.dataLastUpdated) { const t = State.dataLastUpdated; const fmcTag = FMC.tours.length ? ' · FMC✅' : ''; meta.textContent = `${State.sspLoads.length} loads · ${t.getHours().toString().padStart(2,'0')}:${t.getMinutes().toString().padStart(2,'0')}${fmcTag}`; }
         if (!State.sspLoads.length) { list.innerHTML = '<div class="dp-empty">No loads — click 🔄</div>'; if (filterCounts) filterCounts.textContent = ''; return; }
         const rf = State.routeFilter;
-        let html = '', oldDepN = 0, ttN = 0;
+        let html = '', oldDepN = 0, ttN = 0, depN = 0;
         for (let i = 0; i < State.sspLoads.length; i++) {
             const l = State.sspLoads[i];
             if (FMC.isTransferTotes(l.vrId)) { ttN++; continue; }
+            if (l.status === 'DEPARTED' || l.status === 'CANCELLED') { depN++; continue; }
             if (rf) { const match = l.route.toUpperCase().includes(rf) || l.rawRoute.toUpperCase().includes(rf) || l.carrier.toUpperCase().includes(rf) || (l.dockDoor !== '—' && l.dockDoor.toUpperCase().includes(rf)) || (l.vrId && l.vrId.toUpperCase().includes(rf)); if (!match) continue; }
             if (State.hideOldDeparted && isOldDeparted(l, State.oldDepartedMinutes)) { oldDepN++; continue; }
             html += this._renderSSPLoadItem(l, i);
         }
-        const parts = []; if (ttN > 0) parts.push(`🔀${ttN} TT`); if (oldDepN > 0) parts.push(`⏰${oldDepN} old`);
+        const parts = []; if (ttN > 0) parts.push(`🔀${ttN} TT`); if (depN > 0) parts.push(`✈️${depN} dep`); if (oldDepN > 0) parts.push(`⏰${oldDepN} old`);
         if (parts.length) html += `<div class="hidden-count">${parts.join(' · ')} hidden</div>`;
         if (filterCounts) filterCounts.textContent = oldDepN > 0 ? `⏰${oldDepN}` : '';
         list.innerHTML = html || '<div class="dp-empty">No matching OB loads</div>';
