@@ -288,7 +288,7 @@ function cptCountdown(cptStr) {
 }
 function isCptEqualsSdt(load) { if (!load.sdt || load.sdt === '—' || !load.cpt || load.cpt === '—') return false; try { const s = new Date(load.sdt), c = new Date(load.cpt); if (isNaN(s.getTime()) || isNaN(c.getTime())) return false; return Math.abs(s.getTime() - c.getTime()) <= 300000; } catch { return false; } }
 function isSdtOverdue(load, minutes) { if (!load.sdt || load.sdt === '—') return false; try { const sdtDate = new Date(load.sdt); if (isNaN(sdtDate.getTime())) return false; return (Date.now() - sdtDate.getTime()) > minutes * 60000; } catch { return false; } }
-function isOldDeparted(load, minutes) { if (load.status !== 'DEPARTED' && load.status !== 'SCHEDULED') return false; if (!load.sdt || load.sdt === '—') return false; try { const sdtDate = new Date(load.sdt); if (isNaN(sdtDate.getTime())) return false; return (Date.now() - sdtDate.getTime()) > minutes * 60000; } catch { return false; } }
+function isOldDeparted(load, minutes) { if (load.status !== 'DEPARTED' && load.status !== 'COMPLETED' && load.status !== 'SCHEDULED') return false; if (!load.sdt || load.sdt === '—') return false; try { const sdtDate = new Date(load.sdt); if (isNaN(sdtDate.getTime())) return false; return (Date.now() - sdtDate.getTime()) > minutes * 60000; } catch { return false; } }
 
 // ============================================================
 // AUTO MAX CONTAINERS
@@ -587,10 +587,10 @@ const SSP = {
     _fetchJSON(url) { return new Promise((resolve, reject) => { GM_xmlhttpRequest({ method:'GET', url, headers:{'Accept':'application/json'}, withCredentials:true, onload(r) { if (r.status >= 200 && r.status < 300) { try { resolve(JSON.parse(r.responseText)); } catch { reject({message:'JSON parse error'}); } } else reject({message:`HTTP ${r.status}`}); }, onerror() { reject({message:'Network error'}); } }); }); },
     _postJSON(url, body) { return new Promise((resolve, reject) => { GM_xmlhttpRequest({ method:'POST', url, headers:{'Accept':'application/json','Content-Type':'application/json'}, data:JSON.stringify(body), withCredentials:true, onload(r) { if (r.status >= 200 && r.status < 300) { try { resolve(JSON.parse(r.responseText)); } catch { reject({message:'JSON parse error'}); } } else reject({message:`HTTP ${r.status}`}); }, onerror() { reject({message:'Network error'}); } }); }); },
     _parseRoute(raw) { return parseRoute(raw) || '—'; },
-    _statusColor(s) { return { 'LOADING_IN_PROGRESS':'#69f0ae','FINISHED_LOADING':'#ffd600','TRAILER_ATTACHED':'#4fc3f7','READY_TO_DEPART':'#ff9800','READY_FOR_LOADING':'#80cbc4','DEPARTED':'#9e9e9e','SCHEDULED':'#5a6a7a','CANCELLED':'#ff5252' }[s]||'#5a6a7a'; },
-    _statusShort(s) { return { 'LOADING_IN_PROGRESS':'L','FINISHED_LOADING':'C','TRAILER_ATTACHED':'ATT','READY_TO_DEPART':'RTD','READY_FOR_LOADING':'RFL','DEPARTED':'DEP','SCHEDULED':'S','CANCELLED':'X' }[s]||s; },
-    _statusLabel(s) { return { 'LOADING_IN_PROGRESS':'🔄 Loading','FINISHED_LOADING':'✅ Finished','TRAILER_ATTACHED':'🔗 Attached','READY_TO_DEPART':'🚛 Ready','READY_FOR_LOADING':'📋 Ready for Load','DEPARTED':'✈️ Departed','SCHEDULED':'📋 Scheduled','CANCELLED':'❌ Cancelled' }[s]||s; },
-    _facilityStatus(s) { return { 'LOADING_IN_PROGRESS':'inFaciltiy','FINISHED_LOADING':'inFaciltiy','TRAILER_ATTACHED':'inFaciltiy','READY_TO_DEPART':'inFaciltiy','READY_FOR_LOADING':'inFaciltiy','SCHEDULED':'inFaciltiy','DEPARTED':'departed','CANCELLED':'cancelled' }[s]||'inFaciltiy'; },
+    _statusColor(s) { return { 'LOADING_IN_PROGRESS':'#69f0ae','FINISHED_LOADING':'#ffd600','TRAILER_ATTACHED':'#4fc3f7','READY_TO_DEPART':'#ff9800','READY_FOR_LOADING':'#80cbc4','DEPARTED':'#9e9e9e','COMPLETED':'#9e9e9e','SCHEDULED':'#5a6a7a','CANCELLED':'#ff5252' }[s]||'#5a6a7a'; },
+    _statusShort(s) { return { 'LOADING_IN_PROGRESS':'L','FINISHED_LOADING':'C','TRAILER_ATTACHED':'ATT','READY_TO_DEPART':'RTD','READY_FOR_LOADING':'RFL','DEPARTED':'DEP','COMPLETED':'DEP','SCHEDULED':'S','CANCELLED':'X' }[s]||s; },
+    _statusLabel(s) { return { 'LOADING_IN_PROGRESS':'🔄 Loading','FINISHED_LOADING':'✅ Finished','TRAILER_ATTACHED':'🔗 Attached','READY_TO_DEPART':'🚛 Ready','READY_FOR_LOADING':'📋 Ready for Load','DEPARTED':'✈️ Departed','COMPLETED':'✈️ Departed','SCHEDULED':'📋 Scheduled','CANCELLED':'❌ Cancelled' }[s]||s; },
+    _facilityStatus(s) { return { 'LOADING_IN_PROGRESS':'inFaciltiy','FINISHED_LOADING':'inFaciltiy','TRAILER_ATTACHED':'inFaciltiy','READY_TO_DEPART':'inFaciltiy','READY_FOR_LOADING':'inFaciltiy','SCHEDULED':'inFaciltiy','DEPARTED':'departed','COMPLETED':'departed','CANCELLED':'cancelled' }[s]||'inFaciltiy'; },
 
     async fetchData() {
         State.dataLoading = true; UI.updateDataPanel();
@@ -603,13 +603,13 @@ const SSP = {
             const vrIdCount = new Map(); for (const row of allRows) { if (!row.vrId) continue; vrIdCount.set(row.vrId, (vrIdCount.get(row.vrId)||0)+1); }
             const seen = new Set(), preLoads = []; let swapFiltered = 0;
             for (const row of allRows) { if (seen.has(row.planId)) continue; seen.add(row.planId); if (SiteSettings.filterSwapBefore && isSwapBody(row.equipmentType) && !isOneSwapBody(row.equipmentType)) { if ((vrIdCount.get(row.vrId)||0) < 2) { swapFiltered++; continue; } } preLoads.push(row); }
-            const swapGroups = new Map(), loads = [];
+            const swapGroups = new Map(); let loads = [];
             for (const row of preLoads) { if (row.vrId && isSwapBody(row.equipmentType) && !isOneSwapBody(row.equipmentType) && (vrIdCount.get(row.vrId)||0) >= 2) { if (!swapGroups.has(row.vrId)) swapGroups.set(row.vrId, []); swapGroups.get(row.vrId).push(row); } else { loads.push(row); } }
             for (const [, group] of swapGroups) {
                 if (group.length < 2) { loads.push(group[0]); continue; }
                 group.sort((a,b) => { const sa = a.sdt==='—'?'zzz':a.sdt, sb = b.sdt==='—'?'zzz':b.sdt; return sa.localeCompare(sb); });
                 const primary = group[0], routes = [...new Set(group.map(g => g.route))], planIds = group.map(g => g.planId), dockDoors = [...new Set(group.map(g => g.dockDoor).filter(d => d !== '—'))];
-                const statusPrio = ['LOADING_IN_PROGRESS','FINISHED_LOADING','TRAILER_ATTACHED','READY_TO_DEPART','READY_FOR_LOADING','SCHEDULED','DEPARTED','CANCELLED'];
+                const statusPrio = ['LOADING_IN_PROGRESS','FINISHED_LOADING','TRAILER_ATTACHED','READY_TO_DEPART','READY_FOR_LOADING','SCHEDULED','DEPARTED','COMPLETED','CANCELLED'];
                 const bestStatus = group.reduce((best, g) => { const bi = statusPrio.indexOf(best.status), gi = statusPrio.indexOf(g.status); return gi < bi && gi >= 0 ? g : best; }, primary);
                 loads.push({ ...primary, route: routes.length > 1 ? routes.join(' + ') : routes[0], status: bestStatus.status, statusLabel: SSP._statusLabel(bestStatus.status), statusShort: SSP._statusShort(bestStatus.status), statusColor: SSP._statusColor(bestStatus.status), dockDoor: dockDoors.length ? dockDoors.join('+') : '—', _swapCount: group.length, _swapPlanIds: planIds, _swapGroup: group });
             }
@@ -1939,11 +1939,11 @@ const Summary = {
         const remaining = Math.max(0, shift.endDate - now);
         const remH = Math.floor(remaining / 3600000), remM = Math.floor((remaining % 3600000) / 60000);
         const shiftProgress = Math.min(100, Math.max(0, ((now - shift.startDate) / (shift.endDate - shift.startDate)) * 100));
-        const loads = State.sspLoads.filter(l => { if (!l.sdt || l.sdt === '—') { return l.status !== 'DEPARTED' && l.status !== 'CANCELLED'; } try { const sdtDate = new Date(l.sdt); if (isNaN(sdtDate.getTime())) return true; return sdtDate >= shift.startDate && sdtDate <= shift.endDate; } catch { return true; } });
-        const departed=loads.filter(l=>l.status==='DEPARTED').length, loading=loads.filter(l=>l.status==='LOADING_IN_PROGRESS').length, finished=loads.filter(l=>l.status==='FINISHED_LOADING').length, attached=loads.filter(l=>l.status==='TRAILER_ATTACHED').length, ready=loads.filter(l=>l.status==='READY_TO_DEPART').length, readyForLoad=loads.filter(l=>l.status==='READY_FOR_LOADING').length, scheduled=loads.filter(l=>l.status==='SCHEDULED').length, cancelled=loads.filter(l=>l.status==='CANCELLED').length;
+        const loads = State.sspLoads.filter(l => { if (!l.sdt || l.sdt === '—') { return l.status !== 'DEPARTED' && l.status !== 'COMPLETED' && l.status !== 'CANCELLED'; } try { const sdtDate = new Date(l.sdt); if (isNaN(sdtDate.getTime())) return true; return sdtDate >= shift.startDate && sdtDate <= shift.endDate; } catch { return true; } });
+        const departed=loads.filter(l=>l.status==='DEPARTED'||l.status==='COMPLETED').length, loading=loads.filter(l=>l.status==='LOADING_IN_PROGRESS').length, finished=loads.filter(l=>l.status==='FINISHED_LOADING').length, attached=loads.filter(l=>l.status==='TRAILER_ATTACHED').length, ready=loads.filter(l=>l.status==='READY_TO_DEPART').length, readyForLoad=loads.filter(l=>l.status==='READY_FOR_LOADING').length, scheduled=loads.filter(l=>l.status==='SCHEDULED').length, cancelled=loads.filter(l=>l.status==='CANCELLED').length;
         const inProgress = loading + finished + attached + ready;
-        const carriers = {}; for (const l of loads) { const c = l.carrier || 'Unknown'; if (!carriers[c]) carriers[c] = {total:0,departed:0,loading:0,scheduled:0}; carriers[c].total++; if (l.status === 'DEPARTED') carriers[c].departed++; else if (l.status === 'SCHEDULED') carriers[c].scheduled++; else carriers[c].loading++; }
-        const activeDocks = new Set(loads.filter(l => l.dockDoor !== '—' && l.status !== 'DEPARTED' && l.status !== 'CANCELLED').map(l => l.dockDoor));
+        const carriers = {}; for (const l of loads) { const c = l.carrier || 'Unknown'; if (!carriers[c]) carriers[c] = {total:0,departed:0,loading:0,scheduled:0}; carriers[c].total++; if (l.status === 'DEPARTED' || l.status === 'COMPLETED') carriers[c].departed++; else if (l.status === 'SCHEDULED') carriers[c].scheduled++; else carriers[c].loading++; }
+        const activeDocks = new Set(loads.filter(l => l.dockDoor !== '—' && l.status !== 'DEPARTED' && l.status !== 'COMPLETED' && l.status !== 'CANCELLED').map(l => l.dockDoor));
         const ymsReport = YMS.buildReport(); let ymsTotal = 0, ymsEmpty = 0, ymsFull = 0, ymsUnavail = 0;
         for (const [, data] of ymsReport) { ymsTotal += data.total; ymsEmpty += data.empty; ymsFull += data.full; ymsUnavail += data.unavailable; }
         const ymsOccupied = State.ymsLocations.filter(l => l.yardAssets?.some(a => a.type !== 'TRACTOR')).length;
@@ -1997,7 +1997,7 @@ const Trend = {
     takeSnapshot() {
         if (!State.sspLoads.length && !State.ymsLocations.length && !State.vistaContainers.length) return;
         const loads = State.sspLoads;
-        const departed = loads.filter(l => l.status === 'DEPARTED').length;
+        const departed = loads.filter(l => l.status === 'DEPARTED' || l.status === 'COMPLETED').length;
         const loading = loads.filter(l => l.status === 'LOADING_IN_PROGRESS').length;
         const finished = loads.filter(l => l.status === 'FINISHED_LOADING').length;
         const attached = loads.filter(l => l.status === 'TRAILER_ATTACHED').length;
@@ -2021,7 +2021,7 @@ const Trend = {
         for (const c of vc) { vTypes[c.type] = (vTypes[c.type] || 0) + 1; if (vTypesByState[c._state]) { vTypesByState[c._state][c.type] = (vTypesByState[c._state][c.type] || 0) + 1; } }
         const departedTypes = {};
         let departedPkgs = 0;
-        for (const l of loads) { if (l.status !== 'DEPARTED' || !l._containers) continue; for (const c of l._containers.flat.filter(c2 => c2.depth === 1 && c2.contType !== 'PACKAGE')) { departedTypes[c.contType] = (departedTypes[c.contType] || 0) + 1; } departedPkgs += l._containers.stats.packageCount || 0; }
+        for (const l of loads) { if (l.status !== 'DEPARTED' && l.status !== 'COMPLETED' || !l._containers) continue; for (const c of l._containers.flat.filter(c2 => c2.depth === 1 && c2.contType !== 'PACKAGE')) { departedTypes[c.contType] = (departedTypes[c.contType] || 0) + 1; } departedPkgs += l._containers.stats.packageCount || 0; }
         const snapshot = { ts: Date.now(), loads: { total: loads.length, departed, active, scheduled: loads.filter(l=>l.status==='SCHEDULED').length, loading, finished }, yms: { occupied: ymsOccupied, total: ymsTotal, util: ymsUtil, unavail: ymsUnavail }, vista: { total: vc.length, stacked: vStacked, staged: vStaged, loaded: vLoaded, pkgs: vPkgs, criticalLocs, avgDwell, maxDwell, types: vTypes, typesByState: vTypesByState }, departedTypes, departedPkgs };
         const data = this._load(); data.push(snapshot); while (data.length > this._maxSnapshots) data.shift(); this._save(data);
     },
@@ -3346,7 +3346,7 @@ select.tsel{background:#37475a;color:#e0e0e0;border:1px solid #4a5a6a;padding:4p
         var matched = [];
         for (var i = 0; i < State.sspLoads.length; i++) {
             var ld = State.sspLoads[i];
-            if (ld.status === 'DEPARTED' || ld.status === 'CANCELLED') continue;
+            if (ld.status === 'DEPARTED' || ld.status === 'COMPLETED' || ld.status === 'CANCELLED') continue;
             // Match: compare both routeGroupKey AND normalized (suffix-stripped) route
             var ldRoutes = ld.route.split(/\s*\+\s*/);
             // Also try rawRoute segments for matching
@@ -3431,7 +3431,7 @@ select.tsel{background:#37475a;color:#e0e0e0;border:1px solid #4a5a6a;padding:4p
         var sspOnlyRoutes = {};
         for (var si = 0; si < State.sspLoads.length; si++) {
             var ld = State.sspLoads[si];
-            if (ld.status === 'DEPARTED' || ld.status === 'CANCELLED') continue;
+            if (ld.status === 'DEPARTED' || ld.status === 'COMPLETED' || ld.status === 'CANCELLED') continue;
             var ldParts = ld.route.split(/\s*\+\s*/);
             for (var pi = 0; pi < ldParts.length; pi++) {
                 var gk = routeGroupKey(ldParts[pi]);
@@ -3587,7 +3587,7 @@ select.tsel{background:#37475a;color:#e0e0e0;border:1px solid #4a5a6a;padding:4p
 
 
     _updateLoadsSubCounts() {
-        const obCount = State.sspLoads.filter(l => !FMC.isTransferTotes(l.vrId) && l.status !== 'DEPARTED' && l.status !== 'CANCELLED').length;
+        const obCount = State.sspLoads.filter(l => !FMC.isTransferTotes(l.vrId) && l.status !== 'DEPARTED' && l.status !== 'COMPLETED' && l.status !== 'CANCELLED').length;
         const fmcNonInvRaw = FMC.getNonInvTours();
         const fmcNonInvFiltered = fmcNonInvRaw.filter(t => !t.vrId || !RELAT.isCompleted(t.vrId));
         var ymsOrphanCount = 0;
@@ -3610,18 +3610,17 @@ select.tsel{background:#37475a;color:#e0e0e0;border:1px solid #4a5a6a;padding:4p
         if (State.dataLastUpdated) { const t = State.dataLastUpdated; const fmcTag = FMC.tours.length ? ' · FMC✅' : ''; meta.textContent = `${State.sspLoads.length} loads · ${t.getHours().toString().padStart(2,'0')}:${t.getMinutes().toString().padStart(2,'0')}${fmcTag}`; }
         if (!State.sspLoads.length) { list.innerHTML = '<div class="dp-empty">No loads — click 🔄</div>'; if (filterCounts) filterCounts.textContent = ''; return; }
         const rf = State.routeFilter;
-        let html = '', oldDepN = 0, ttN = 0, depN = 0;
+        let html = '', depN = 0, ttN = 0;
         for (let i = 0; i < State.sspLoads.length; i++) {
             const l = State.sspLoads[i];
             if (FMC.isTransferTotes(l.vrId)) { ttN++; continue; }
-            if (l.status === 'DEPARTED' || l.status === 'CANCELLED') { depN++; continue; }
+            if (l.status === 'DEPARTED' || l.status === 'COMPLETED' || l.status === 'CANCELLED') { depN++; continue; }
             if (rf) { const match = l.route.toUpperCase().includes(rf) || l.rawRoute.toUpperCase().includes(rf) || l.carrier.toUpperCase().includes(rf) || (l.dockDoor !== '—' && l.dockDoor.toUpperCase().includes(rf)) || (l.vrId && l.vrId.toUpperCase().includes(rf)); if (!match) continue; }
-            if (State.hideOldDeparted && isOldDeparted(l, State.oldDepartedMinutes)) { oldDepN++; continue; }
             html += this._renderSSPLoadItem(l, i);
         }
-        const parts = []; if (ttN > 0) parts.push(`🔀${ttN} TT`); if (depN > 0) parts.push(`✈️${depN} dep`); if (oldDepN > 0) parts.push(`⏰${oldDepN} old`);
+        const parts = []; if (ttN > 0) parts.push(`🔀${ttN} TT`); if (depN > 0) parts.push(`✈️${depN} dep`);
         if (parts.length) html += `<div class="hidden-count">${parts.join(' · ')} hidden</div>`;
-        if (filterCounts) filterCounts.textContent = oldDepN > 0 ? `⏰${oldDepN}` : '';
+        if (filterCounts) filterCounts.textContent = depN > 0 ? `✈️${depN}` : '';
         list.innerHTML = html || '<div class="dp-empty">No matching OB loads</div>';
                 // ── Focus Mode: bind eye buttons ──
         list.querySelectorAll('.load-focus-btn').forEach(btn => {
@@ -3646,7 +3645,7 @@ select.tsel{background:#37475a;color:#e0e0e0;border:1px solid #4a5a6a;padding:4p
         const sdtShort = l.sdt !== '—' ? (l.sdt.split(' ')[1] || l.sdt) : '—';
         const isSwap = isSwapBody(l.equipmentType);
         const isCptLoad = isCptEqualsSdt(l);
-        const cpt = (l.status !== 'DEPARTED' && l.status !== 'CANCELLED') ? cptCountdown(l.cpt) : null;
+        const cpt = (l.status !== 'DEPARTED' && l.status !== 'COMPLETED' && l.status !== 'CANCELLED') ? cptCountdown(l.cpt) : null;
         const cptBadge = cpt ? `<span class="cpt-countdown cpt-${cpt.level}">⏰${cpt.text}</span>` : '';
         const eqBadge = l.equipmentType ? `<span class="load-equip-badge" style="background:${equipTypeColor(l.equipmentType)}20;color:${equipTypeColor(l.equipmentType)}">${equipTypeShort(l.equipmentType, l.vrId, l.subCarrier)}</span>` : '';
         const vrId2 = l.vrId?.toUpperCase() || '';
@@ -4117,7 +4116,7 @@ ${eyeBtn}
             ).join('')
             : `<span class="load-yms-badge load-yms-missing">❌YMS</span>`;
 
-        const drawerCpt = (load.status !== 'DEPARTED' && load.status !== 'CANCELLED') ? cptCountdown(load.cpt) : null;
+        const drawerCpt = (load.status !== 'DEPARTED' && load.status !== 'COMPLETED' && load.status !== 'CANCELLED') ? cptCountdown(load.cpt) : null;
         const drawerCptBadge = drawerCpt ? `<span class="cpt-countdown cpt-${drawerCpt.level}" title="CPT: ${load.cpt}">⏰${drawerCpt.text}</span>` : '';
 
         document.getElementById('drawer-route').innerHTML = `<span>${load.route}</span>`
@@ -4624,7 +4623,7 @@ openTrend() {
 
         // ── SSP departed count ──
         const shiftLoads = State.sspLoads.filter(l => {
-            if (l.status !== 'DEPARTED') return false;
+            if (l.status !== 'DEPARTED' && l.status !== 'COMPLETED') return false;
             if (!l.sdt || l.sdt === '—') return false;
             try { const d = new Date(l.sdt); return d >= shift.startDate && d <= shift.endDate; } catch { return false; }
         });
@@ -4671,7 +4670,7 @@ openTrend() {
         // ── SSP MISS TRACKER ──
         const sspMisses = [];
         for (const l of State.sspLoads) {
-            if (l.status === 'DEPARTED' || l.status === 'CANCELLED') continue;
+            if (l.status === 'DEPARTED' || l.status === 'COMPLETED' || l.status === 'CANCELLED') continue;
             if (!isCptEqualsSdt(l)) continue;
             if (!isSdtOverdue(l, 30)) continue;
             const sdtDate = new Date(l.sdt);
@@ -5566,7 +5565,7 @@ ${vistaLocs.length ? `<h2>&#x1F4E6; Other CPTs for ${load.route} (Vista) <span c
         const remH = Math.floor(remaining / 3600000), remM = Math.floor((remaining % 3600000) / 60000);
 
         const loads = State.sspLoads;
-        const departed = loads.filter(l => l.status === 'DEPARTED').length;
+        const departed = loads.filter(l => l.status === 'DEPARTED' || l.status === 'COMPLETED').length;
         const loading = loads.filter(l => l.status === 'LOADING_IN_PROGRESS').length, finished = loads.filter(l => l.status === 'FINISHED_LOADING').length, attached = loads.filter(l => l.status === 'TRAILER_ATTACHED').length, ready = loads.filter(l => l.status === 'READY_TO_DEPART').length;
         const inFacility = loading + finished + attached + ready;
 
