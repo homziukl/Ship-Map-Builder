@@ -607,6 +607,15 @@ const SSP = {
             for (const row of preLoads) { if (row.vrId && isSwapBody(row.equipmentType) && !isOneSwapBody(row.equipmentType) && (vrIdCount.get(row.vrId)||0) >= 2) { if (!swapGroups.has(row.vrId)) swapGroups.set(row.vrId, []); swapGroups.get(row.vrId).push(row); } else { loads.push(row); } }
             for (const [, group] of swapGroups) {
                 if (group.length < 2) { loads.push(group[0]); continue; }
+                // 2SW orphan fix: if any swap body in the group is DEPARTED/COMPLETED,
+                // mark the entire merged load as DEPARTED (the VR ID has left the yard)
+                const anyDeparted = group.some(g => g.status === 'DEPARTED' || g.status === 'COMPLETED');
+                if (anyDeparted) {
+                    const dep = group.find(g => g.status === 'DEPARTED' || g.status === 'COMPLETED') || group[0];
+                    loads.push({ ...dep, status: 'DEPARTED', statusLabel: SSP._statusLabel('DEPARTED'), statusShort: SSP._statusShort('DEPARTED'), statusColor: SSP._statusColor('DEPARTED'), _swapCount: group.length, _swapPlanIds: group.map(g => g.planId), _swapGroup: group, _swapOrphanResolved: true });
+                    swapFiltered++;
+                    continue;
+                }
                 group.sort((a,b) => { const sa = a.sdt==='—'?'zzz':a.sdt, sb = b.sdt==='—'?'zzz':b.sdt; return sa.localeCompare(sb); });
                 const primary = group[0], routes = [...new Set(group.map(g => g.route))], planIds = group.map(g => g.planId), dockDoors = [...new Set(group.map(g => g.dockDoor).filter(d => d !== '—'))];
                 const statusPrio = ['LOADING_IN_PROGRESS','FINISHED_LOADING','TRAILER_ATTACHED','READY_TO_DEPART','READY_FOR_LOADING','SCHEDULED','DEPARTED','COMPLETED','CANCELLED'];
