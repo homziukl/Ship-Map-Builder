@@ -3311,7 +3311,7 @@ select.tsel{background:#37475a;color:#e0e0e0;border:1px solid #4a5a6a;padding:4p
 
         var detailRows = '';
         detailRows += '<div class="fmc-tour-detail-row"><span class="fmc-tour-detail-label">Location</span><span class="fmc-tour-detail-val" style="color:#e040fb;font-weight:bold">' + yo.locationCode + '</span></div>';
-        if (yo.vrId) detailRows += '<div class="fmc-tour-detail-row"><span class="fmc-tour-detail-label">VR ID</span><span class="fmc-tour-detail-val" style="color:#4fc3f7;cursor:pointer" data-copy="' + yo.vrId + '">' + yo.vrId + '</span></div>';
+        if (yo.vrId) detailRows += '<div class="fmc-tour-detail-row"><span class="fmc-tour-detail-label">VR ID</span><span class="fmc-tour-detail-val" style="color:#4fc3f7;cursor:pointer" data-copy="' + yo.vrId + '">' + yo.vrId + '</span><a href="https://trans-logistics-eu.amazon.com/fmc/execution/search/' + yo.vrId + '" target="_blank" rel="noopener" title="Open in FMC" style="margin-left:4px;text-decoration:none;font-size:11px" onclick="event.stopPropagation()">🚛</a></div>';
         detailRows += '<div class="fmc-tour-detail-row"><span class="fmc-tour-detail-label">Plate</span><span class="fmc-tour-detail-val">' + yo.plate + '</span></div>';
         detailRows += '<div class="fmc-tour-detail-row"><span class="fmc-tour-detail-label">Owner</span><span class="fmc-tour-detail-val">' + yo.owner + '</span></div>';
         detailRows += '<div class="fmc-tour-detail-row"><span class="fmc-tour-detail-label">Shipper</span><span class="fmc-tour-detail-val" style="color:#ff9900">' + yo.shipperLabel + '</span></div>';
@@ -3751,6 +3751,7 @@ const eyeBtn = `<button class="load-focus-btn ${isFocused ? 'focused' : ''}" dat
 <div class="load-header">
 <span class="load-expand-icon">${l._expanded ? '▼' : '▶'}</span>
 <span class="load-route" title="${l.rawRoute}">${l.route}</span>
+${l.vrId ? `<a href="https://trans-logistics-eu.amazon.com/fmc/execution/search/${l.vrId}" target="_blank" rel="noopener" title="FMC: ${l.vrId}" class="fmc-link-icon" style="text-decoration:none;font-size:11px;cursor:pointer;flex-shrink:0" onclick="event.stopPropagation()">🚛</a>` : ''}
 ${eqBadge}
 <span class="load-status" style="background:${l.statusColor};color:#000">${l.statusShort}</span>
 ${l.dockDoor !== '—' ? `<span class="load-dock">${l.dockDoor}</span>` : ''}
@@ -4115,7 +4116,7 @@ ${eyeBtn}
             : (tour.route || tour.facilitySeq);
 
         const detail = `<div class="fmc-tour-detail">
-            ${tour.vrId ? `<div class="fmc-tour-detail-row"><span class="fmc-tour-detail-label">VR ID</span><span class="fmc-tour-detail-val" style="color:#4fc3f7;cursor:pointer" data-copy="${tour.vrId}">${tour.vrId}</span></div>` : ''}
+            ${tour.vrId ? `<div class="fmc-tour-detail-row"><span class="fmc-tour-detail-label">VR ID</span><span class="fmc-tour-detail-val" style="color:#4fc3f7;cursor:pointer" data-copy="${tour.vrId}">${tour.vrId}</span><a href="https://trans-logistics-eu.amazon.com/fmc/execution/search/${tour.vrId}" target="_blank" rel="noopener" title="Open in FMC" style="margin-left:4px;text-decoration:none;font-size:11px" onclick="event.stopPropagation()">🚛</a></div>` : ''}
             <div class="fmc-tour-detail-row"><span class="fmc-tour-detail-label">Lane</span><span class="fmc-tour-detail-val">${tour.facilitySeq}</span></div>
             <div class="fmc-tour-detail-row"><span class="fmc-tour-detail-label">Route</span><span class="fmc-tour-detail-val">${tour.route}</span></div>
             <div class="fmc-tour-detail-row"><span class="fmc-tour-detail-label">Shipper</span><span class="fmc-tour-detail-val">${tour.shippers.join(', ') || '—'}</span></div>
@@ -4230,7 +4231,7 @@ ${eyeBtn}
         const drawerCptBadge = drawerCpt ? `<span class="cpt-countdown cpt-${drawerCpt.level}" title="CPT: ${load.cpt}">⏰${drawerCpt.text}</span>` : '';
 
         document.getElementById('drawer-route').innerHTML = `<span>${load.route}</span>`
-            + (load.vrId ? `<span style="font-size:11px;font-family:monospace;color:#4fc3f7;cursor:pointer" title="Click to copy" id="drawer-vrid">${load.vrId}</span>` : '')
+            + (load.vrId ? `<span style="font-size:11px;font-family:monospace;color:#4fc3f7;cursor:pointer" title="Click to copy" id="drawer-vrid">${load.vrId}</span><a href="https://trans-logistics-eu.amazon.com/fmc/execution/search/${load.vrId}" target="_blank" rel="noopener" title="Open in FMC" style="margin-left:4px;text-decoration:none;font-size:12px;cursor:pointer" class="fmc-link-icon">🚛</a>` : '')
             + `<span class="load-status" style="background:${load.statusColor};color:#000">${load.statusLabel}</span>`
             + (load.dockDoor !== '—' ? `<span style="color:#e040fb;font-weight:bold">${load.dockDoor}</span>` : '')
             + `<span class="load-equip-badge" style="background:${equipTypeColor(load.equipmentType)}20;color:${equipTypeColor(load.equipmentType)}">${load._swapCount > 1 ? `${load._swapCount}× ` : ''}${equipTypeShort(load.equipmentType, load.vrId, load.subCarrier)}</span>`
