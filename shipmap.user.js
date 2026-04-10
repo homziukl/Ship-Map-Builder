@@ -3302,7 +3302,9 @@ select.tsel{background:#37475a;color:#e0e0e0;border:1px solid #4a5a6a;padding:4p
 
         // Detail rows
         var detailRows = '';
-        detailRows += '<div class="fmc-tour-detail-row"><span class="fmc-tour-detail-label">Trailer</span><span class="fmc-tour-detail-val" style="color:#4fc3f7">' + (apt.trailerNumber || '—') + '</span></div>';
+        detailRows += '<div class="fmc-tour-detail-row"><span class="fmc-tour-detail-label">Apt ID</span><span class="fmc-tour-detail-val" data-copy="' + apt.appointmentId + '" style="color:#ff9900;cursor:pointer" title="Click to copy">' + apt.appointmentId + '</span></div>';
+        detailRows += '<div class="fmc-tour-detail-row"><span class="fmc-tour-detail-label">Status</span><span class="fmc-tour-detail-val" style="color:' + sc + ';font-weight:bold">' + apt.status + (apt.rawStatus !== apt.status ? ' (' + apt.rawStatus + ')' : '') + '</span></div>';
+        detailRows += '<div class="fmc-tour-detail-row"><span class="fmc-tour-detail-label">Trailer</span><span class="fmc-tour-detail-val" data-copy="' + (apt.trailerNumber || '') + '" style="color:#4fc3f7;cursor:pointer" title="Click to copy">' + (apt.trailerNumber || '—') + '</span></div>';
         detailRows += '<div class="fmc-tour-detail-row"><span class="fmc-tour-detail-label">Carrier</span><span class="fmc-tour-detail-val">' + carrierText + '</span></div>';
         detailRows += '<div class="fmc-tour-detail-row"><span class="fmc-tour-detail-label">Type</span><span class="fmc-tour-detail-val">' + (apt.appointmentType || '') + ' / ' + loadTypeText + '</span></div>';
         detailRows += '<div class="fmc-tour-detail-row"><span class="fmc-tour-detail-label">Sched</span><span class="fmc-tour-detail-val">' + fmtDt(apt.schedStart) + ' \u2192 ' + fmtDt(apt.schedEnd) + '</span></div>';
@@ -3829,6 +3831,13 @@ ${eyeBtn}
                     State.clearHighlight(); R.render();
                 } else { State.clearHighlight(); R.render(); }
             });
+            // Copy support for DM detail values
+            item.querySelectorAll('[data-copy]').forEach(function(el) {
+                el.addEventListener('click', function(e) {
+                    e.stopPropagation();
+                    navigator.clipboard.writeText(el.dataset.copy).then(function() { var orig = el.textContent; el.textContent = '\u2705'; setTimeout(function() { el.textContent = orig; }, 1500); });
+                });
+            });
         });
         // YMS orphan click handlers
         list.querySelectorAll('.yms-orphan-item').forEach(function(item) {
@@ -4035,6 +4044,8 @@ ${eyeBtn}
 
     _bindFmcTourClicks(container) {
         container.querySelectorAll('.fmc-tour-item').forEach(item => {
+            // Skip DM and YMS-orphan items — they have their own click handlers
+            if (item.classList.contains('dm-item') || item.classList.contains('yms-orphan-item')) return;
             const header = item.querySelector('.fmc-tour-header');
             const icon = item.querySelector('.load-expand-icon');
             header?.addEventListener('click', () => {
