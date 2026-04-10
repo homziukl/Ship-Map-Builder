@@ -1827,6 +1827,83 @@ _buildCompletedSet(rawList) {
         return this.completedVrIds.has(vrId.toUpperCase());
     },
 
+    // ── Origin site container counts ──
+    _originCache: new Map(), // originSite -> { tasks: [], ts: timestamp }
+    _originFetching: new Set(),
+
+    async fetchOriginData(originSite) {
+        if (!originSite || this._originFetching.has(originSite)) return;
+        const cached = this._originCache.get(originSite);
+        if (cached && Date.now() - cached.ts < 300000) return; // 5min cache
+
+        this._originFetching.add(originSite);
+        try {
+            const now = Date.now();
+            const fromDate = now - 14 * 86400000; // 14 days back (some loads are old)
+            const toDate = now + 86400000;
+            const url = `${this._baseUrl}/api/asset-return/tasks/assets/${originSite}?from_date=${fromDate}&to_date=${toDate}`;
+
+            console.log(`[ShipMap:RELAT] 📡 Fetching origin ${originSite}...`);
+
+            const responseText = await new Promise((resolve, reject) => {
+                GM_xmlhttpRequest({
+                    method: 'GET', url,
+                    headers: { 'Accept': 'application/json' },
+                    withCredentials: true,
+                    onload(r) { if (r.status >= 200 && r.status < 300) resolve(r.responseText); else reject({ message: `HTTP ${r.status}` }); },
+                    onerror() { reject({ message: 'Network error' }); }
+                });
+            });
+
+            const data = JSON.parse(responseText);
+            const rawList = data?.assetCount || [];
+
+            // Parse origin tasks and cache
+            this._originCache.set(originSite, { tasks: rawList, ts: Date.now() });
+            console.log(`[ShipMap:RELAT] ✅ Origin ${originSite}: ${rawList.length} tasks`);
+
+        } catch (err) {
+            console.error(`[ShipMap:RELAT] ❌ Origin ${originSite}: ${err.message}`);
+        }
+        this._originFetching.delete(originSite);
+    },
+
+    getOriginTask(originSite, vrId) {
+        if (!originSite || !vrId) return null;
+        const cached = this._originCache.get(originSite);
+        if (!cached) return null;
+        const vu = vrId.toUpperCase();
+        return cached.tasks.find(t => (t.vrid || '').toUpperCase() === vu) || null;
+    },
+
+    // Returns { counts: "63 Cart, 2 Bag", raw: {CART:{usable:63}, ...}, updatedBy: "login", status: "COMPLETED" } or null
+    getAssetCounts(vrId, facilitySeq) {
+        if (!vrId || !facilitySeq) return null;
+        const parts = facilitySeq.toUpperCase().split('->');
+        if (parts.length < 2) return null;
+        const originSite = parts[0].trim();
+        const task = this.getOriginTask(originSite, vrId);
+        if (!task?.asset_counts_info) return null;
+        const info = task.asset_counts_info;
+        const countObj = info.count || {};
+        const parts2 = [];
+        for (const [type, vals] of Object.entries(countObj)) {
+            const usable = vals.usable || 0;
+            const damaged = vals.damaged || 0;
+            let label = type.charAt(0) + type.slice(1).toLowerCase();
+            let text = `${usable} ${label}`;
+            if (damaged > 0) text += ` (+${damaged} dmg)`;
+            parts2.push(text);
+        }
+        return {
+            counts: parts2.length ? parts2.join(', ') : null,
+            raw: countObj,
+            updatedBy: info.last_update_by || '',
+            status: info.completion_status || '',
+            completionTime: info.completion_time || ''
+        };
+    },
+
     // ── Lifecycle ──
     start() {
         this.stopAutoRefresh();
@@ -3696,6 +3773,17 @@ ${eyeBtn}
         const relatFilteredCount = fmcToursRaw.filter(t => t.vrId && RELAT.isCompleted(t.vrId)).length;
         const fmcTours = fmcToursRaw.filter(t => !t.vrId || !RELAT.isCompleted(t.vrId));
 
+        // Trigger RELAT origin fetches for unique origin sites (async, non-blocking)
+        const originSites = new Set();
+        for (const t of fmcTours) {
+            if (!t.facilitySeq) continue;
+            const parts = t.facilitySeq.toUpperCase().split('->');
+            if (parts.length >= 2 && parts[parts.length - 1].includes(CONFIG.warehouseId)) {
+                originSites.add(parts[0].trim());
+            }
+        }
+        for (const site of originSites) RELAT.fetchOriginData(site);
+
         const dmNonInv = Dockmaster.getNonInv();
         const rf = State.routeFilter;
 
@@ -4038,6 +4126,7 @@ ${eyeBtn}
             <div class="fmc-tour-detail-row"><span class="fmc-tour-detail-label">Plan Dep</span><span class="fmc-tour-detail-val">${fmtDateTime(tour.plannedYardDeparture)}</span></div>
 
             ${ymsHits ? `<div class="fmc-tour-detail-row"><span class="fmc-tour-detail-label">YMS</span><span class="fmc-tour-detail-val" style="color:#69f0ae">${ymsHits.map(h => h.locationCode).join(', ')}</span></div>` : ''}
+            ${(() => { const ac = RELAT.getAssetCounts(tour.vrId, tour.facilitySeq); if (!ac) return '<div class="fmc-tour-detail-row"><span class="fmc-tour-detail-label">Loaded</span><span class="fmc-tour-detail-val" style="color:#5a6a7a">N/A</span></div>'; return `<div class="fmc-tour-detail-row"><span class="fmc-tour-detail-label">Loaded</span><span class="fmc-tour-detail-val" style="color:#69f0ae;font-weight:bold">${ac.counts || 'N/A'}</span></div>` + (ac.updatedBy ? `<div class="fmc-tour-detail-row"><span class="fmc-tour-detail-label">Counted by</span><span class="fmc-tour-detail-val" style="color:#78909C">${ac.updatedBy}</span></div>` : ''); })()}
         </div>`;
         return `<div class="fmc-tour-item" data-fmc-vrid="${vrId}"><div class="fmc-tour-header"><span class="load-expand-icon">▶</span><span class="fmc-tour-route" title="${tour.facilitySeq}">${displayName}</span>${eqBadge}<span class="fmc-tour-status" style="background:${sc};color:#000">${ss}</span><span class="fmc-tour-time">${timeLabel}</span>${delayBadge}${dwellBadge}${ymsBadge}<span class="fmc-tour-carrier">${tour.carrier || ''}</span></div>${detail}</div>`;
     },
