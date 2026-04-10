@@ -1622,7 +1622,8 @@ const Dockmaster = {
                 // ── Skip cancelled immediately ──
                 if (status === 'CANCELLED') continue;
 
-                const appointmentId = apt.appointmentId || '';
+                const appointmentId = apt.inboundShipmentAppointmentId || apt.appointmentId || apt.id || '';
+                const vehicleVisitId = apt.vehicleVisitIdentifier || '';
                 const carrierName = apt.carrierName || '';
                 const trailerNumber = apt.trailerNumber || apt.vehicleId || '';
 
@@ -1684,7 +1685,7 @@ const Dockmaster = {
                 else if (actualArrival && closeDate) dwellMin = Math.round((closeDate - actualArrival) / 60000);
 
                 appointments.push({
-                    appointmentId, trailerNumber, carrierName,
+                    appointmentId, vehicleVisitId, trailerNumber, carrierName,
                     status: dmStatus, rawStatus: status, isNonInv,
                     appointmentType, carrierLoadType, defectType,
                     schedStart, schedEnd, checkInStart,
