@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Ship Map Builder
 // @namespace    http://tampermonkey.net/
-// @version      3.5.2
+// @version      3.5.3
 // @description  Ship Map + SSP + YMS + Vista + FMC + STEM integration
 // @author       homziukl
 // @match        https://stem-eu.corp.amazon.com/url*
@@ -852,6 +852,8 @@ const YMS = {
                 for (const asset of (loc.yardAssets || [])) {
                     const vrIds = ymsGetVrIds(asset);
                     for (const vr of vrIds) { if (!vrIdMap[vr]) vrIdMap[vr] = []; if (!vrIdMap[vr].some(h => h.locationCode === loc.code)) vrIdMap[vr].push({ asset, locationCode: loc.code, location: loc }); }
+                    // Also index ISA identifiers so DM appointments can highlight on map
+                    if (asset.load?.identifiers) { for (const id of asset.load.identifiers) { if (id.type === 'ISA' && id.identifier) { const isa = id.identifier.toUpperCase(); if (!vrIdMap[isa]) vrIdMap[isa] = []; if (!vrIdMap[isa].some(h => h.locationCode === loc.code)) vrIdMap[isa].push({ asset, locationCode: loc.code, location: loc }); } } }
                     if (asset.annotation) { const matches = asset.annotation.match(/\b\d{2,3}[A-Z0-9]{5,}\b/gi) || []; for (const m of matches) { const mu = m.toUpperCase(); const alreadyDirect = vrIdMap[mu]?.some(h => h.locationCode === loc.code); if (!alreadyDirect) { if (!annotationVrIds[mu]) annotationVrIds[mu] = []; if (!annotationVrIds[mu].some(h => h.locationCode === loc.code)) annotationVrIds[mu].push({ asset, locationCode: loc.code, location: loc, fromAnnotation: true }); } } }
                 }
             }
@@ -6130,7 +6132,7 @@ function bootMain() {
     R.init('cvs');
     R.render();
     UI.refreshList();
-    UI.setStatus(`✅ v3.5.1 | ${State.elements.length} el | ${State.editMode ? '🔓' : '🔒'}`);
+    UI.setStatus(`✅ v3.5.2 | ${State.elements.length} el | ${State.editMode ? '🔓' : '🔒'}`);
     try { Minimap.init(); } catch(e) { console.warn('[Minimap] init failed:', e); }
     try { GitSync.init(); } catch(e) { console.warn('[GitSync] init failed:', e); }
 try { unsafeWindow.__SM = { State, YMS, FMC, Dockmaster, RELAT, MapManager, MatchIndex, ymsGetVrIds }; } catch(e) {}
