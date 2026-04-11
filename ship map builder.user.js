@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Ship Map Builder
 // @namespace    http://tampermonkey.net/
-// @version      3.5.2
+// @version      3.5.4
 // @description  Ship Map + SSP + YMS + Vista + FMC + STEM integration
 // @author       homziukl
 // @match        https://stem-eu.corp.amazon.com/url*
@@ -607,6 +607,15 @@ const SSP = {
             for (const row of preLoads) { if (row.vrId && isSwapBody(row.equipmentType) && !isOneSwapBody(row.equipmentType) && (vrIdCount.get(row.vrId)||0) >= 2) { if (!swapGroups.has(row.vrId)) swapGroups.set(row.vrId, []); swapGroups.get(row.vrId).push(row); } else { loads.push(row); } }
             for (const [, group] of swapGroups) {
                 if (group.length < 2) { loads.push(group[0]); continue; }
+                // 2SW orphan fix: if any swap body in the group is DEPARTED/COMPLETED,
+                // mark the entire merged load as DEPARTED (the VR ID has left the yard)
+                const anyDeparted = group.some(g => g.status === 'DEPARTED' || g.status === 'COMPLETED');
+                if (anyDeparted) {
+                    const dep = group.find(g => g.status === 'DEPARTED' || g.status === 'COMPLETED') || group[0];
+                    loads.push({ ...dep, status: 'DEPARTED', statusLabel: SSP._statusLabel('DEPARTED'), statusShort: SSP._statusShort('DEPARTED'), statusColor: SSP._statusColor('DEPARTED'), _swapCount: group.length, _swapPlanIds: group.map(g => g.planId), _swapGroup: group, _swapOrphanResolved: true });
+                    swapFiltered++;
+                    continue;
+                }
                 group.sort((a,b) => { const sa = a.sdt==='—'?'zzz':a.sdt, sb = b.sdt==='—'?'zzz':b.sdt; return sa.localeCompare(sb); });
                 const primary = group[0], routes = [...new Set(group.map(g => g.route))], planIds = group.map(g => g.planId), dockDoors = [...new Set(group.map(g => g.dockDoor).filter(d => d !== '—'))];
                 const statusPrio = ['LOADING_IN_PROGRESS','FINISHED_LOADING','TRAILER_ATTACHED','READY_TO_DEPART','READY_FOR_LOADING','SCHEDULED','DEPARTED','COMPLETED','CANCELLED'];
@@ -843,6 +852,8 @@ const YMS = {
                 for (const asset of (loc.yardAssets || [])) {
                     const vrIds = ymsGetVrIds(asset);
                     for (const vr of vrIds) { if (!vrIdMap[vr]) vrIdMap[vr] = []; if (!vrIdMap[vr].some(h => h.locationCode === loc.code)) vrIdMap[vr].push({ asset, locationCode: loc.code, location: loc }); }
+                    // Also index ISA identifiers so DM appointments can highlight on map
+                    if (asset.load?.identifiers) { for (const id of asset.load.identifiers) { if (id.type === 'ISA' && id.identifier) { const isa = id.identifier.toUpperCase(); if (!vrIdMap[isa]) vrIdMap[isa] = []; if (!vrIdMap[isa].some(h => h.locationCode === loc.code)) vrIdMap[isa].push({ asset, locationCode: loc.code, location: loc }); } } }
                     if (asset.annotation) { const matches = asset.annotation.match(/\b\d{2,3}[A-Z0-9]{5,}\b/gi) || []; for (const m of matches) { const mu = m.toUpperCase(); const alreadyDirect = vrIdMap[mu]?.some(h => h.locationCode === loc.code); if (!alreadyDirect) { if (!annotationVrIds[mu]) annotationVrIds[mu] = []; if (!annotationVrIds[mu].some(h => h.locationCode === loc.code)) annotationVrIds[mu].push({ asset, locationCode: loc.code, location: loc, fromAnnotation: true }); } } }
                 }
             }
@@ -1613,7 +1624,8 @@ const Dockmaster = {
                 // ── Skip cancelled immediately ──
                 if (status === 'CANCELLED') continue;
 
-                const appointmentId = apt.appointmentId || '';
+                const appointmentId = apt.inboundShipmentAppointmentId || apt.appointmentId || apt.id || '';
+                const vehicleVisitId = apt.vehicleVisitIdentifier || '';
                 const carrierName = apt.carrierName || '';
                 const trailerNumber = apt.trailerNumber || apt.vehicleId || '';
 
@@ -1675,7 +1687,7 @@ const Dockmaster = {
                 else if (actualArrival && closeDate) dwellMin = Math.round((closeDate - actualArrival) / 60000);
 
                 appointments.push({
-                    appointmentId, trailerNumber, carrierName,
+                    appointmentId, vehicleVisitId, trailerNumber, carrierName,
                     status: dmStatus, rawStatus: status, isNonInv,
                     appointmentType, carrierLoadType, defectType,
                     schedStart, schedEnd, checkInStart,
@@ -1815,6 +1827,83 @@ _buildCompletedSet(rawList) {
     isCompleted(vrId) {
         if (!vrId) return false;
         return this.completedVrIds.has(vrId.toUpperCase());
+    },
+
+    // ── Origin site container counts ──
+    _originCache: new Map(), // originSite -> { tasks: [], ts: timestamp }
+    _originFetching: new Set(),
+
+    async fetchOriginData(originSite) {
+        if (!originSite || this._originFetching.has(originSite)) return;
+        const cached = this._originCache.get(originSite);
+        if (cached && Date.now() - cached.ts < 300000) return; // 5min cache
+
+        this._originFetching.add(originSite);
+        try {
+            const now = Date.now();
+            const fromDate = now - 14 * 86400000; // 14 days back (some loads are old)
+            const toDate = now + 86400000;
+            const url = `${this._baseUrl}/api/asset-return/tasks/assets/${originSite}?from_date=${fromDate}&to_date=${toDate}`;
+
+            console.log(`[ShipMap:RELAT] 📡 Fetching origin ${originSite}...`);
+
+            const responseText = await new Promise((resolve, reject) => {
+                GM_xmlhttpRequest({
+                    method: 'GET', url,
+                    headers: { 'Accept': 'application/json' },
+                    withCredentials: true,
+                    onload(r) { if (r.status >= 200 && r.status < 300) resolve(r.responseText); else reject({ message: `HTTP ${r.status}` }); },
+                    onerror() { reject({ message: 'Network error' }); }
+                });
+            });
+
+            const data = JSON.parse(responseText);
+            const rawList = data?.assetCount || [];
+
+            // Parse origin tasks and cache
+            this._originCache.set(originSite, { tasks: rawList, ts: Date.now() });
+            console.log(`[ShipMap:RELAT] ✅ Origin ${originSite}: ${rawList.length} tasks`);
+
+        } catch (err) {
+            console.error(`[ShipMap:RELAT] ❌ Origin ${originSite}: ${err.message}`);
+        }
+        this._originFetching.delete(originSite);
+    },
+
+    getOriginTask(originSite, vrId) {
+        if (!originSite || !vrId) return null;
+        const cached = this._originCache.get(originSite);
+        if (!cached) return null;
+        const vu = vrId.toUpperCase();
+        return cached.tasks.find(t => (t.vrid || '').toUpperCase() === vu) || null;
+    },
+
+    // Returns { counts: "63 Cart, 2 Bag", raw: {CART:{usable:63}, ...}, updatedBy: "login", status: "COMPLETED" } or null
+    getAssetCounts(vrId, facilitySeq) {
+        if (!vrId || !facilitySeq) return null;
+        const parts = facilitySeq.toUpperCase().split('->');
+        if (parts.length < 2) return null;
+        const originSite = parts[0].trim();
+        const task = this.getOriginTask(originSite, vrId);
+        if (!task?.asset_counts_info) return null;
+        const info = task.asset_counts_info;
+        const countObj = info.count || {};
+        const parts2 = [];
+        for (const [type, vals] of Object.entries(countObj)) {
+            const usable = vals.usable || 0;
+            const damaged = vals.damaged || 0;
+            let label = type.charAt(0) + type.slice(1).toLowerCase();
+            let text = `${usable} ${label}`;
+            if (damaged > 0) text += ` (+${damaged} dmg)`;
+            parts2.push(text);
+        }
+        return {
+            counts: parts2.length ? parts2.join(', ') : null,
+            raw: countObj,
+            updatedBy: info.last_update_by || '',
+            status: info.completion_status || '',
+            completionTime: info.completion_time || ''
+        };
     },
 
     // ── Lifecycle ──
@@ -3224,7 +3313,7 @@ select.tsel{background:#37475a;color:#e0e0e0;border:1px solid #4a5a6a;padding:4p
 
         var detailRows = '';
         detailRows += '<div class="fmc-tour-detail-row"><span class="fmc-tour-detail-label">Location</span><span class="fmc-tour-detail-val" style="color:#e040fb;font-weight:bold">' + yo.locationCode + '</span></div>';
-        if (yo.vrId) detailRows += '<div class="fmc-tour-detail-row"><span class="fmc-tour-detail-label">VR ID</span><span class="fmc-tour-detail-val" style="color:#4fc3f7;cursor:pointer" data-copy="' + yo.vrId + '">' + yo.vrId + '</span></div>';
+        if (yo.vrId) detailRows += '<div class="fmc-tour-detail-row"><span class="fmc-tour-detail-label">VR ID</span><span class="fmc-tour-detail-val" style="color:#4fc3f7;cursor:pointer" data-copy="' + yo.vrId + '">' + yo.vrId + '</span><a href="https://trans-logistics-eu.amazon.com/fmc/execution/search/' + yo.vrId + '" target="_blank" rel="noopener" title="Open in FMC" style="margin-left:4px;text-decoration:none;font-size:11px" onclick="event.stopPropagation()">🚛</a></div>';
         detailRows += '<div class="fmc-tour-detail-row"><span class="fmc-tour-detail-label">Plate</span><span class="fmc-tour-detail-val">' + yo.plate + '</span></div>';
         detailRows += '<div class="fmc-tour-detail-row"><span class="fmc-tour-detail-label">Owner</span><span class="fmc-tour-detail-val">' + yo.owner + '</span></div>';
         detailRows += '<div class="fmc-tour-detail-row"><span class="fmc-tour-detail-label">Shipper</span><span class="fmc-tour-detail-val" style="color:#ff9900">' + yo.shipperLabel + '</span></div>';
@@ -3293,7 +3382,9 @@ select.tsel{background:#37475a;color:#e0e0e0;border:1px solid #4a5a6a;padding:4p
 
         // Detail rows
         var detailRows = '';
-        detailRows += '<div class="fmc-tour-detail-row"><span class="fmc-tour-detail-label">Trailer</span><span class="fmc-tour-detail-val" style="color:#4fc3f7">' + (apt.trailerNumber || '—') + '</span></div>';
+        detailRows += '<div class="fmc-tour-detail-row"><span class="fmc-tour-detail-label">Apt ID</span><span class="fmc-tour-detail-val" data-copy="' + apt.appointmentId + '" style="color:#ff9900;cursor:pointer" title="Click to copy">' + apt.appointmentId + '</span></div>';
+        detailRows += '<div class="fmc-tour-detail-row"><span class="fmc-tour-detail-label">Status</span><span class="fmc-tour-detail-val" style="color:' + sc + ';font-weight:bold">' + apt.status + (apt.rawStatus !== apt.status ? ' (' + apt.rawStatus + ')' : '') + '</span></div>';
+        detailRows += '<div class="fmc-tour-detail-row"><span class="fmc-tour-detail-label">Trailer</span><span class="fmc-tour-detail-val" data-copy="' + (apt.trailerNumber || '') + '" style="color:#4fc3f7;cursor:pointer" title="Click to copy">' + (apt.trailerNumber || '—') + '</span></div>';
         detailRows += '<div class="fmc-tour-detail-row"><span class="fmc-tour-detail-label">Carrier</span><span class="fmc-tour-detail-val">' + carrierText + '</span></div>';
         detailRows += '<div class="fmc-tour-detail-row"><span class="fmc-tour-detail-label">Type</span><span class="fmc-tour-detail-val">' + (apt.appointmentType || '') + ' / ' + loadTypeText + '</span></div>';
         detailRows += '<div class="fmc-tour-detail-row"><span class="fmc-tour-detail-label">Sched</span><span class="fmc-tour-detail-val">' + fmtDt(apt.schedStart) + ' \u2192 ' + fmtDt(apt.schedEnd) + '</span></div>';
@@ -3662,6 +3753,7 @@ const eyeBtn = `<button class="load-focus-btn ${isFocused ? 'focused' : ''}" dat
 <div class="load-header">
 <span class="load-expand-icon">${l._expanded ? '▼' : '▶'}</span>
 <span class="load-route" title="${l.rawRoute}">${l.route}</span>
+${l.vrId ? `<a href="https://trans-logistics-eu.amazon.com/fmc/execution/search/${l.vrId}" target="_blank" rel="noopener" title="FMC: ${l.vrId}" class="fmc-link-icon" style="text-decoration:none;font-size:11px;cursor:pointer;flex-shrink:0" onclick="event.stopPropagation()">🚛</a>` : ''}
 ${eqBadge}
 <span class="load-status" style="background:${l.statusColor};color:#000">${l.statusShort}</span>
 ${l.dockDoor !== '—' ? `<span class="load-dock">${l.dockDoor}</span>` : ''}
@@ -3683,6 +3775,17 @@ ${eyeBtn}
         const fmcToursRaw = FMC.getNonInvTours();
         const relatFilteredCount = fmcToursRaw.filter(t => t.vrId && RELAT.isCompleted(t.vrId)).length;
         const fmcTours = fmcToursRaw.filter(t => !t.vrId || !RELAT.isCompleted(t.vrId));
+
+        // Trigger RELAT origin fetches for unique origin sites (async, non-blocking)
+        const originSites = new Set();
+        for (const t of fmcTours) {
+            if (!t.facilitySeq) continue;
+            const parts = t.facilitySeq.toUpperCase().split('->');
+            if (parts.length >= 2 && parts[parts.length - 1].includes(CONFIG.warehouseId)) {
+                originSites.add(parts[0].trim());
+            }
+        }
+        for (const site of originSites) RELAT.fetchOriginData(site);
 
         const dmNonInv = Dockmaster.getNonInv();
         const rf = State.routeFilter;
@@ -3819,6 +3922,13 @@ ${eyeBtn}
                     }
                     State.clearHighlight(); R.render();
                 } else { State.clearHighlight(); R.render(); }
+            });
+            // Copy support for DM detail values
+            item.querySelectorAll('[data-copy]').forEach(function(el) {
+                el.addEventListener('click', function(e) {
+                    e.stopPropagation();
+                    navigator.clipboard.writeText(el.dataset.copy).then(function() { var orig = el.textContent; el.textContent = '\u2705'; setTimeout(function() { el.textContent = orig; }, 1500); });
+                });
             });
         });
         // YMS orphan click handlers
@@ -4008,7 +4118,7 @@ ${eyeBtn}
             : (tour.route || tour.facilitySeq);
 
         const detail = `<div class="fmc-tour-detail">
-            ${tour.vrId ? `<div class="fmc-tour-detail-row"><span class="fmc-tour-detail-label">VR ID</span><span class="fmc-tour-detail-val" style="color:#4fc3f7;cursor:pointer" data-copy="${tour.vrId}">${tour.vrId}</span></div>` : ''}
+            ${tour.vrId ? `<div class="fmc-tour-detail-row"><span class="fmc-tour-detail-label">VR ID</span><span class="fmc-tour-detail-val" style="color:#4fc3f7;cursor:pointer" data-copy="${tour.vrId}">${tour.vrId}</span><a href="https://trans-logistics-eu.amazon.com/fmc/execution/search/${tour.vrId}" target="_blank" rel="noopener" title="Open in FMC" style="margin-left:4px;text-decoration:none;font-size:11px" onclick="event.stopPropagation()">🚛</a></div>` : ''}
             <div class="fmc-tour-detail-row"><span class="fmc-tour-detail-label">Lane</span><span class="fmc-tour-detail-val">${tour.facilitySeq}</span></div>
             <div class="fmc-tour-detail-row"><span class="fmc-tour-detail-label">Route</span><span class="fmc-tour-detail-val">${tour.route}</span></div>
             <div class="fmc-tour-detail-row"><span class="fmc-tour-detail-label">Shipper</span><span class="fmc-tour-detail-val">${tour.shippers.join(', ') || '—'}</span></div>
@@ -4019,6 +4129,7 @@ ${eyeBtn}
             <div class="fmc-tour-detail-row"><span class="fmc-tour-detail-label">Plan Dep</span><span class="fmc-tour-detail-val">${fmtDateTime(tour.plannedYardDeparture)}</span></div>
 
             ${ymsHits ? `<div class="fmc-tour-detail-row"><span class="fmc-tour-detail-label">YMS</span><span class="fmc-tour-detail-val" style="color:#69f0ae">${ymsHits.map(h => h.locationCode).join(', ')}</span></div>` : ''}
+            ${(() => { const ac = RELAT.getAssetCounts(tour.vrId, tour.facilitySeq); if (!ac) return '<div class="fmc-tour-detail-row"><span class="fmc-tour-detail-label">Loaded</span><span class="fmc-tour-detail-val" style="color:#5a6a7a">N/A</span></div>'; return `<div class="fmc-tour-detail-row"><span class="fmc-tour-detail-label">Loaded</span><span class="fmc-tour-detail-val" style="color:#69f0ae;font-weight:bold">${ac.counts || 'N/A'}</span></div>` + (ac.updatedBy ? `<div class="fmc-tour-detail-row"><span class="fmc-tour-detail-label">Counted by</span><span class="fmc-tour-detail-val" style="color:#78909C">${ac.updatedBy}</span></div>` : ''); })()}
         </div>`;
         return `<div class="fmc-tour-item" data-fmc-vrid="${vrId}"><div class="fmc-tour-header"><span class="load-expand-icon">▶</span><span class="fmc-tour-route" title="${tour.facilitySeq}">${displayName}</span>${eqBadge}<span class="fmc-tour-status" style="background:${sc};color:#000">${ss}</span><span class="fmc-tour-time">${timeLabel}</span>${delayBadge}${dwellBadge}${ymsBadge}<span class="fmc-tour-carrier">${tour.carrier || ''}</span></div>${detail}</div>`;
     },
@@ -4026,6 +4137,8 @@ ${eyeBtn}
 
     _bindFmcTourClicks(container) {
         container.querySelectorAll('.fmc-tour-item').forEach(item => {
+            // Skip DM and YMS-orphan items — they have their own click handlers
+            if (item.classList.contains('dm-item') || item.classList.contains('yms-orphan-item')) return;
             const header = item.querySelector('.fmc-tour-header');
             const icon = item.querySelector('.load-expand-icon');
             header?.addEventListener('click', () => {
@@ -4120,7 +4233,7 @@ ${eyeBtn}
         const drawerCptBadge = drawerCpt ? `<span class="cpt-countdown cpt-${drawerCpt.level}" title="CPT: ${load.cpt}">⏰${drawerCpt.text}</span>` : '';
 
         document.getElementById('drawer-route').innerHTML = `<span>${load.route}</span>`
-            + (load.vrId ? `<span style="font-size:11px;font-family:monospace;color:#4fc3f7;cursor:pointer" title="Click to copy" id="drawer-vrid">${load.vrId}</span>` : '')
+            + (load.vrId ? `<span style="font-size:11px;font-family:monospace;color:#4fc3f7;cursor:pointer" title="Click to copy" id="drawer-vrid">${load.vrId}</span><a href="https://trans-logistics-eu.amazon.com/fmc/execution/search/${load.vrId}" target="_blank" rel="noopener" title="Open in FMC" style="margin-left:4px;text-decoration:none;font-size:12px;cursor:pointer" class="fmc-link-icon">🚛</a>` : '')
             + `<span class="load-status" style="background:${load.statusColor};color:#000">${load.statusLabel}</span>`
             + (load.dockDoor !== '—' ? `<span style="color:#e040fb;font-weight:bold">${load.dockDoor}</span>` : '')
             + `<span class="load-equip-badge" style="background:${equipTypeColor(load.equipmentType)}20;color:${equipTypeColor(load.equipmentType)}">${load._swapCount > 1 ? `${load._swapCount}× ` : ''}${equipTypeShort(load.equipmentType, load.vrId, load.subCarrier)}</span>`
@@ -4596,7 +4709,7 @@ openTrend() {
         const remainByLoc = {};
         for (const c of remaining) {
             const loc = c.location || 'UNKNOWN';
-            if (!remainByLoc[loc]) remainByLoc[loc] = { types: {}, total: 0, pkgs: 0, maxDwell: 0, routes: {} };
+            if (!remainByLoc[loc]) remainByLoc[loc] = { types: {}, total: 0, pkgs: 0, maxDwell: 0, routes: {}, closedCount: 0 };
             const g = remainByLoc[loc];
             g.types[c.type] = (g.types[c.type] || 0) + 1;
             g.total++;
@@ -4604,9 +4717,16 @@ openTrend() {
             if (c.dwellTimeInMinutes > g.maxDwell) g.maxDwell = c.dwellTimeInMinutes;
             const route = c.route ? routeGroupKey(c.route) : 'UNKNOWN';
             g.routes[route] = (g.routes[route] || 0) + 1;
+            if (c.isClosed || c.closed) g.closedCount++;
         }
 
-        const remainLocs = Object.entries(remainByLoc).sort((a, b) => b[1].total - a[1].total);
+        const remainLocs = Object.entries(remainByLoc).sort((a, b) => {
+            const u = a[0].toUpperCase(), v = b[0].toUpperCase();
+            const pri = (s) => { if (/GENERAL.BOX|HOT.PICK|STAGE.BOOM/i.test(s)) return 0; if (/STAGE.BOX/i.test(s)) return 1; if (/STAGE/i.test(s)) return 2; return 3; };
+            const pa = pri(u), pb = pri(v);
+            if (pa !== pb) return pa - pb;
+            return u.localeCompare(v, undefined, { numeric: true });
+        });
 
         // ── Delta calculation (shift processed) ──
         const processed = {};
@@ -4721,12 +4841,15 @@ openTrend() {
             : '<div style="color:#5a6a7a;font-size:11px;font-style:italic;padding:8px">No remaining containers</div>';
 
         const locRows = remainLocs.map(([loc, d]) => {
-            const types = Object.entries(d.types).map(([t, n]) => `<span class="handover-type-badge" style="background:${TC[t] || '#5a6a7a'}22;color:${TC[t] || '#8899aa'}">${n} ${(TS[t] || t).replace(/^[^\s]+\s/, '')}</span>`).join('');
+            const types = Object.entries(d.types).map(([t, n]) => `<span class="handover-type-badge" style="background:${TC[t] || '#5a6a7a'}22;color:${TC[t] || '#8899aa'}">${n} ${(TS[t] || t).replace(/^[^\s]+\s/, '')}</span>`).join(' ');
             const topRoutes = Object.entries(d.routes).sort((a, b) => b[1] - a[1]).slice(0, 3).map(([r, n]) => `${r} ×${n}`).join(', ');
             const dwC = d.maxDwell > 120 ? '#ff5252' : d.maxDwell > 60 ? '#ff9100' : '#78909C';
             const matched = State.elements.some(el => matchElement(el, loc));
-            return `<tr><td style="font-family:monospace;font-weight:bold;color:${matched ? '#e0e0e0' : '#ff5252'};white-space:nowrap">${loc} ${matched ? '' : '❌'}</td><td>${types}</td><td style="text-align:center;font-weight:bold;color:#ff9900">${d.total}</td><td style="text-align:center;color:#b0bec5">${d.pkgs}</td><td style="font-family:monospace;color:${dwC};font-size:10px">${d.maxDwell > 0 ? d.maxDwell + 'm' : '—'}</td><td style="font-size:9px;color:#78909C">${topRoutes}</td></tr>`;
+            const closedBadge = d.closedCount > 0 ? `<span style="color:#69f0ae;font-weight:bold">${d.closedCount}</span>` : '<span style="color:#5a6a7a">0</span>';
+            return `<tr data-closed="${d.closedCount}"><td style="font-family:monospace;font-weight:bold;color:${matched ? '#e0e0e0' : '#ff5252'};white-space:nowrap">${loc} ${matched ? '' : '❌'}</td><td>${types}</td><td style="text-align:center;font-weight:bold;color:#ff9900">${d.total}</td><td style="text-align:center">${closedBadge}</td><td style="text-align:center;color:#b0bec5">${d.pkgs}</td><td style="font-family:monospace;color:${dwC};font-size:10px">${d.maxDwell > 0 ? d.maxDwell + 'm' : '—'}</td><td style="font-size:9px;color:#78909C">${topRoutes}</td></tr>`;
         }).join('');
+
+        const closedLocsCount = remainLocs.filter(([, d]) => d.closedCount > 0).length;
 
         const departedCards = Object.entries(departedByEquip).length
             ? Object.entries(departedByEquip).map(([eq, n]) => `<div class="handover-card"><div class="handover-card-val" style="color:#9e9e9e">${n}</div><div class="handover-card-label">${eq}</div></div>`).join('')
@@ -4806,10 +4929,10 @@ ${vistaMisses.map(r => `<div style="margin-bottom:10px">
 </div>
 
 <div class="handover-section">
-<h3>📍 Remaining by location</h3>
+<h3>📍 Remaining by location <button id="print-closed-locs" title="Print locations with closed containers" style="background:none;border:1px solid #5a6a7a;border-radius:4px;cursor:pointer;padding:2px 6px;margin-left:auto;font-size:12px;color:#b0bec5;display:inline-flex;align-items:center;gap:4px;line-height:1;${closedLocsCount === 0 ? 'opacity:0.3;cursor:default;' : ''}" ${closedLocsCount === 0 ? 'disabled' : ''}>🖨️ <span style="font-size:10px">${closedLocsCount}</span></button></h3>
 ${remainLocs.length ? `<div style="max-height:40vh;overflow-y:auto;border:1px solid #2a3a4a;border-radius:6px">
-<table class="handover-loc-table">
-<thead><tr><th>Location</th><th>Containers</th><th style="text-align:center">Cnt</th><th style="text-align:center">Pkg</th><th>Dwell</th><th>Routes</th></tr></thead>
+<table class="handover-loc-table" id="remain-loc-table">
+<thead><tr><th>Location</th><th>Containers</th><th style="text-align:center">Cnt</th><th style="text-align:center">Closed</th><th style="text-align:center">Pkg</th><th>Dwell</th><th>Routes</th></tr></thead>
 <tbody>${locRows}</tbody>
 </table></div>` : '<div style="color:#69f0ae;font-size:12px;padding:12px;text-align:center">🎉 All clear!</div>'}
 </div>
@@ -4869,6 +4992,49 @@ ${ymsTrailers.length ? `<div class="handover-section">
 
         document.getElementById('handover-close').onclick = () => overlay.remove();
         overlay.addEventListener('click', (e) => { if (e.target === overlay) overlay.remove(); });
+
+        document.getElementById('print-closed-locs')?.addEventListener('click', () => {
+            const table = document.getElementById('remain-loc-table');
+            if (!table) return;
+            const rows = table.querySelectorAll('tbody tr');
+            const closedRows = [];
+            rows.forEach(r => { if (parseInt(r.dataset.closed, 10) > 0) closedRows.push(r.cloneNode(true)); });
+            if (!closedRows.length) return;
+            const now = new Date();
+            const ts = now.toLocaleString('en-GB', { day:'2-digit', month:'short', year:'numeric', hour:'2-digit', minute:'2-digit' });
+            let rowsHtml = '';
+            closedRows.forEach(r => {
+                const cells = Array.from(r.querySelectorAll('td'));
+                // columns: 0=Location, 1=Containers, 2=Cnt, 3=Closed, 4=Pkg, 5=Dwell, 6=Routes
+                const keep = [0, 1, 4, 5, 6]; // skip Cnt(2) and Closed(3)
+                const rowHtml = keep.map(i => {
+                    let inner = cells[i].innerHTML.replace(/color:[^;"]+/g, 'color:#000').replace(/background:[^;"]+/g, 'background:#eee');
+                    if (i === 6) inner = inner.replace(/UNKNOWN\s*×\d+,?\s*/g, '').replace(/,\s*$/, '').trim();
+                    return `<td>${inner}</td>`;
+                }).join('');
+                rowsHtml += `<tr>${rowHtml}</tr>`;
+            });
+            const html = `<!DOCTYPE html><html><head><meta charset="utf-8"><title>Closed Containers — ${CONFIG.warehouseId}</title><style>
+body{font-family:Arial,Helvetica,sans-serif;margin:20px;color:#000}
+h2{font-size:16px;margin:0 0 4px 0}
+.meta{font-size:11px;color:#555;margin-bottom:12px}
+table{width:100%;border-collapse:collapse;font-size:11px}
+th{text-align:left;font-size:10px;text-transform:uppercase;padding:6px 8px;border-bottom:2px solid #333;background:#f5f5f5}
+td{padding:5px 8px;border-bottom:1px solid #ddd}
+tr:nth-child(even){background:#fafafa}
+.badge{display:inline-block;padding:1px 6px;border-radius:3px;font-size:10px;font-weight:bold;margin:1px}
+@media print{body{margin:10px}h2{font-size:14px}table{font-size:10px}}
+</style></head><body>
+<h2>📍 Locations with closed containers — ${CONFIG.warehouseId}</h2>
+<div class="meta">${ts} · ${shift.label} shift · ${closedRows.length} location${closedRows.length !== 1 ? 's' : ''}</div>
+<table><thead><tr><th>Location</th><th>Containers</th><th>Pkg</th><th>Dwell</th><th>Routes</th></tr></thead><tbody>${rowsHtml}</tbody></table></body></html>`;
+            const blob = new Blob([html], { type: 'text/html' });
+            const url = URL.createObjectURL(blob);
+            const printWin = window.open(url, '_blank');
+            if (!printWin) { URL.revokeObjectURL(url); return; }
+            printWin.addEventListener('afterprint', () => URL.revokeObjectURL(url));
+            printWin.onload = () => setTimeout(() => printWin.print(), 200);
+        });
 
         document.getElementById('handover-copy').onclick = () => {
             let text = `📋 SHIFT HANDOVER — ${CONFIG.warehouseId} ${shift.label}\n`;
@@ -6019,7 +6185,7 @@ function bootMain() {
     R.init('cvs');
     R.render();
     UI.refreshList();
-    UI.setStatus(`✅ v3.5.1 | ${State.elements.length} el | ${State.editMode ? '🔓' : '🔒'}`);
+    UI.setStatus(`✅ v3.5.2 | ${State.elements.length} el | ${State.editMode ? '🔓' : '🔒'}`);
     try { Minimap.init(); } catch(e) { console.warn('[Minimap] init failed:', e); }
     try { GitSync.init(); } catch(e) { console.warn('[GitSync] init failed:', e); }
 try { unsafeWindow.__SM = { State, YMS, FMC, Dockmaster, RELAT, MapManager, MatchIndex, ymsGetVrIds }; } catch(e) {}
