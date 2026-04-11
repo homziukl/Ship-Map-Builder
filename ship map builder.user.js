@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Ship Map Builder
 // @namespace    http://tampermonkey.net/
-// @version      3.5.4
+// @version      3.5.5
 // @description  Ship Map + SSP + YMS + Vista + FMC + STEM integration
 // @author       homziukl
 // @match        https://stem-eu.corp.amazon.com/url*
@@ -2937,6 +2937,10 @@ select.tsel{background:#37475a;color:#e0e0e0;border:1px solid #4a5a6a;padding:4p
 .loads-sub-count.has{background:rgba(255,153,0,.15);color:#ff9900}
 .fmc-tour-item{padding:3px 8px;border-bottom:1px solid #0d1b2a;transition:.1s}
 .fmc-tour-item:hover{background:rgba(255,255,255,.03)}
+.load-rlb1-warn{background:rgba(229,57,53,.12)!important;border-left:3px solid #e53935!important}
+.load-rlb1-warn:hover{background:rgba(229,57,53,.18)!important}
+.fmc-planned-warn{background:rgba(255,214,0,.10)!important;border-left:3px solid #ffd600!important}
+.fmc-planned-warn:hover{background:rgba(255,214,0,.16)!important}
 .fmc-tour-header{display:flex;align-items:center;gap:6px;min-height:20px;cursor:pointer}
 .fmc-tour-header:hover{background:rgba(255,153,0,.05)}
 .fmc-tour-route{font-size:10px;font-weight:bold;color:#e0e0e0;font-family:'Amazon Ember',monospace;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;flex:1;min-width:0}
@@ -3749,13 +3753,15 @@ select.tsel{background:#37475a;color:#e0e0e0;border:1px solid #4a5a6a;padding:4p
 const focusColor = isFocused ? State.focusRoutes.get(routeGroupKey(l.rawRoute))?.color || '#ff9900' : '';
 const eyeBtn = `<button class="load-focus-btn ${isFocused ? 'focused' : ''}" data-focus-raw="${l.rawRoute}" title="Toggle focus" style="${isFocused ? 'color:' + focusColor : ''}">👁</button>`;
 
-        return `<div class="load-item ${l._expanded ? 'expanded' : ''} ${isHL ? 'hl-active' : ''}" data-load-idx="${idx}">
+        const isRlb1 = (l.carrier || '').toUpperCase() === 'RLB1';
+        return `<div class="load-item ${l._expanded ? 'expanded' : ''} ${isHL ? 'hl-active' : ''} ${isRlb1 ? 'load-rlb1-warn' : ''}" data-load-idx="${idx}">
 <div class="load-header">
 <span class="load-expand-icon">${l._expanded ? '▼' : '▶'}</span>
 <span class="load-route" title="${l.rawRoute}">${l.route}</span>
 ${l.vrId ? `<a href="https://trans-logistics-eu.amazon.com/fmc/execution/search/${l.vrId}" target="_blank" rel="noopener" title="FMC: ${l.vrId}" class="fmc-link-icon" style="text-decoration:none;font-size:11px;cursor:pointer;flex-shrink:0" onclick="event.stopPropagation()">🚛</a>` : ''}
 ${eqBadge}
 <span class="load-status" style="background:${l.statusColor};color:#000">${l.statusShort}</span>
+${isRlb1 ? '<span style="font-size:8px;color:#e53935;font-weight:bold;flex-shrink:0">🔴RLB1</span>' : ''}
 ${l.dockDoor !== '—' ? `<span class="load-dock">${l.dockDoor}</span>` : ''}
 <span class="load-sdt ${isCptLoad ? 'cpt-load' : ''}">${isCptLoad ? '⭐' : ''}${sdtShort}</span>
 ${cptBadge}${yb}
@@ -4131,7 +4137,8 @@ ${eyeBtn}
             ${ymsHits ? `<div class="fmc-tour-detail-row"><span class="fmc-tour-detail-label">YMS</span><span class="fmc-tour-detail-val" style="color:#69f0ae">${ymsHits.map(h => h.locationCode).join(', ')}</span></div>` : ''}
             ${(() => { const ac = RELAT.getAssetCounts(tour.vrId, tour.facilitySeq); if (!ac) return '<div class="fmc-tour-detail-row"><span class="fmc-tour-detail-label">Loaded</span><span class="fmc-tour-detail-val" style="color:#5a6a7a">N/A</span></div>'; return `<div class="fmc-tour-detail-row"><span class="fmc-tour-detail-label">Loaded</span><span class="fmc-tour-detail-val" style="color:#69f0ae;font-weight:bold">${ac.counts || 'N/A'}</span></div>` + (ac.updatedBy ? `<div class="fmc-tour-detail-row"><span class="fmc-tour-detail-label">Counted by</span><span class="fmc-tour-detail-val" style="color:#78909C">${ac.updatedBy}</span></div>` : ''); })()}
         </div>`;
-        return `<div class="fmc-tour-item" data-fmc-vrid="${vrId}"><div class="fmc-tour-header"><span class="load-expand-icon">▶</span><span class="fmc-tour-route" title="${tour.facilitySeq}">${displayName}</span>${eqBadge}<span class="fmc-tour-status" style="background:${sc};color:#000">${ss}</span><span class="fmc-tour-time">${timeLabel}</span>${delayBadge}${dwellBadge}${ymsBadge}<span class="fmc-tour-carrier">${tour.carrier || ''}</span></div>${detail}</div>`;
+        const isPlanned = tour.tourStatus === 'PLANNED';
+        return `<div class="fmc-tour-item ${isPlanned ? 'fmc-planned-warn' : ''}" data-fmc-vrid="${vrId}"><div class="fmc-tour-header"><span class="load-expand-icon">▶</span><span class="fmc-tour-route" title="${tour.facilitySeq}">${displayName}</span>${eqBadge}<span class="fmc-tour-status" style="background:${sc};color:#000">${ss}</span>${isPlanned ? '<span style="font-size:8px;color:#ffd600;font-weight:bold;flex-shrink:0">🟡PLN</span>' : ''}<span class="fmc-tour-time">${timeLabel}</span>${delayBadge}${dwellBadge}${ymsBadge}<span class="fmc-tour-carrier">${tour.carrier || ''}</span></div>${detail}</div>`;
     },
 
 
@@ -6185,7 +6192,7 @@ function bootMain() {
     R.init('cvs');
     R.render();
     UI.refreshList();
-    UI.setStatus(`✅ v3.5.2 | ${State.elements.length} el | ${State.editMode ? '🔓' : '🔒'}`);
+    UI.setStatus(`✅ v3.5.5 | ${State.elements.length} el | ${State.editMode ? '🔓' : '🔒'}`);
     try { Minimap.init(); } catch(e) { console.warn('[Minimap] init failed:', e); }
     try { GitSync.init(); } catch(e) { console.warn('[GitSync] init failed:', e); }
 try { unsafeWindow.__SM = { State, YMS, FMC, Dockmaster, RELAT, MapManager, MatchIndex, ymsGetVrIds }; } catch(e) {}
