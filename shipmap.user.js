@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Ship Map Builder
 // @namespace    http://tampermonkey.net/
-// @version      3.5.3
+// @version      3.5.4
 // @description  Ship Map + SSP + YMS + Vista + FMC + STEM integration
 // @author       homziukl
 // @match        https://stem-eu.corp.amazon.com/url*
@@ -4709,7 +4709,7 @@ openTrend() {
         const remainByLoc = {};
         for (const c of remaining) {
             const loc = c.location || 'UNKNOWN';
-            if (!remainByLoc[loc]) remainByLoc[loc] = { types: {}, total: 0, pkgs: 0, maxDwell: 0, routes: {} };
+            if (!remainByLoc[loc]) remainByLoc[loc] = { types: {}, total: 0, pkgs: 0, maxDwell: 0, routes: {}, closedCount: 0 };
             const g = remainByLoc[loc];
             g.types[c.type] = (g.types[c.type] || 0) + 1;
             g.total++;
@@ -4717,9 +4717,16 @@ openTrend() {
             if (c.dwellTimeInMinutes > g.maxDwell) g.maxDwell = c.dwellTimeInMinutes;
             const route = c.route ? routeGroupKey(c.route) : 'UNKNOWN';
             g.routes[route] = (g.routes[route] || 0) + 1;
+            if (c.isClosed || c.closed) g.closedCount++;
         }
 
-        const remainLocs = Object.entries(remainByLoc).sort((a, b) => b[1].total - a[1].total);
+        const remainLocs = Object.entries(remainByLoc).sort((a, b) => {
+            const u = a[0].toUpperCase(), v = b[0].toUpperCase();
+            const pri = (s) => { if (/GENERAL.BOX|HOT.PICK|STAGE.BOOM/i.test(s)) return 0; if (/STAGE.BOX/i.test(s)) return 1; if (/STAGE/i.test(s)) return 2; return 3; };
+            const pa = pri(u), pb = pri(v);
+            if (pa !== pb) return pa - pb;
+            return u.localeCompare(v, undefined, { numeric: true });
+        });
 
         // ── Delta calculation (shift processed) ──
         const processed = {};
@@ -4834,12 +4841,15 @@ openTrend() {
             : '<div style="color:#5a6a7a;font-size:11px;font-style:italic;padding:8px">No remaining containers</div>';
 
         const locRows = remainLocs.map(([loc, d]) => {
-            const types = Object.entries(d.types).map(([t, n]) => `<span class="handover-type-badge" style="background:${TC[t] || '#5a6a7a'}22;color:${TC[t] || '#8899aa'}">${n} ${(TS[t] || t).replace(/^[^\s]+\s/, '')}</span>`).join('');
+            const types = Object.entries(d.types).map(([t, n]) => `<span class="handover-type-badge" style="background:${TC[t] || '#5a6a7a'}22;color:${TC[t] || '#8899aa'}">${n} ${(TS[t] || t).replace(/^[^\s]+\s/, '')}</span>`).join(' ');
             const topRoutes = Object.entries(d.routes).sort((a, b) => b[1] - a[1]).slice(0, 3).map(([r, n]) => `${r} ×${n}`).join(', ');
             const dwC = d.maxDwell > 120 ? '#ff5252' : d.maxDwell > 60 ? '#ff9100' : '#78909C';
             const matched = State.elements.some(el => matchElement(el, loc));
-            return `<tr><td style="font-family:monospace;font-weight:bold;color:${matched ? '#e0e0e0' : '#ff5252'};white-space:nowrap">${loc} ${matched ? '' : '❌'}</td><td>${types}</td><td style="text-align:center;font-weight:bold;color:#ff9900">${d.total}</td><td style="text-align:center;color:#b0bec5">${d.pkgs}</td><td style="font-family:monospace;color:${dwC};font-size:10px">${d.maxDwell > 0 ? d.maxDwell + 'm' : '—'}</td><td style="font-size:9px;color:#78909C">${topRoutes}</td></tr>`;
+            const closedBadge = d.closedCount > 0 ? `<span style="color:#69f0ae;font-weight:bold">${d.closedCount}</span>` : '<span style="color:#5a6a7a">0</span>';
+            return `<tr data-closed="${d.closedCount}"><td style="font-family:monospace;font-weight:bold;color:${matched ? '#e0e0e0' : '#ff5252'};white-space:nowrap">${loc} ${matched ? '' : '❌'}</td><td>${types}</td><td style="text-align:center;font-weight:bold;color:#ff9900">${d.total}</td><td style="text-align:center">${closedBadge}</td><td style="text-align:center;color:#b0bec5">${d.pkgs}</td><td style="font-family:monospace;color:${dwC};font-size:10px">${d.maxDwell > 0 ? d.maxDwell + 'm' : '—'}</td><td style="font-size:9px;color:#78909C">${topRoutes}</td></tr>`;
         }).join('');
+
+        const closedLocsCount = remainLocs.filter(([, d]) => d.closedCount > 0).length;
 
         const departedCards = Object.entries(departedByEquip).length
             ? Object.entries(departedByEquip).map(([eq, n]) => `<div class="handover-card"><div class="handover-card-val" style="color:#9e9e9e">${n}</div><div class="handover-card-label">${eq}</div></div>`).join('')
@@ -4919,10 +4929,10 @@ ${vistaMisses.map(r => `<div style="margin-bottom:10px">
 </div>
 
 <div class="handover-section">
-<h3>📍 Remaining by location</h3>
+<h3>📍 Remaining by location <button id="print-closed-locs" title="Print locations with closed containers" style="background:none;border:1px solid #5a6a7a;border-radius:4px;cursor:pointer;padding:2px 6px;margin-left:auto;font-size:12px;color:#b0bec5;display:inline-flex;align-items:center;gap:4px;line-height:1;${closedLocsCount === 0 ? 'opacity:0.3;cursor:default;' : ''}" ${closedLocsCount === 0 ? 'disabled' : ''}>🖨️ <span style="font-size:10px">${closedLocsCount}</span></button></h3>
 ${remainLocs.length ? `<div style="max-height:40vh;overflow-y:auto;border:1px solid #2a3a4a;border-radius:6px">
-<table class="handover-loc-table">
-<thead><tr><th>Location</th><th>Containers</th><th style="text-align:center">Cnt</th><th style="text-align:center">Pkg</th><th>Dwell</th><th>Routes</th></tr></thead>
+<table class="handover-loc-table" id="remain-loc-table">
+<thead><tr><th>Location</th><th>Containers</th><th style="text-align:center">Cnt</th><th style="text-align:center">Closed</th><th style="text-align:center">Pkg</th><th>Dwell</th><th>Routes</th></tr></thead>
 <tbody>${locRows}</tbody>
 </table></div>` : '<div style="color:#69f0ae;font-size:12px;padding:12px;text-align:center">🎉 All clear!</div>'}
 </div>
@@ -4982,6 +4992,49 @@ ${ymsTrailers.length ? `<div class="handover-section">
 
         document.getElementById('handover-close').onclick = () => overlay.remove();
         overlay.addEventListener('click', (e) => { if (e.target === overlay) overlay.remove(); });
+
+        document.getElementById('print-closed-locs')?.addEventListener('click', () => {
+            const table = document.getElementById('remain-loc-table');
+            if (!table) return;
+            const rows = table.querySelectorAll('tbody tr');
+            const closedRows = [];
+            rows.forEach(r => { if (parseInt(r.dataset.closed, 10) > 0) closedRows.push(r.cloneNode(true)); });
+            if (!closedRows.length) return;
+            const now = new Date();
+            const ts = now.toLocaleString('en-GB', { day:'2-digit', month:'short', year:'numeric', hour:'2-digit', minute:'2-digit' });
+            let rowsHtml = '';
+            closedRows.forEach(r => {
+                const cells = Array.from(r.querySelectorAll('td'));
+                // columns: 0=Location, 1=Containers, 2=Cnt, 3=Closed, 4=Pkg, 5=Dwell, 6=Routes
+                const keep = [0, 1, 4, 5, 6]; // skip Cnt(2) and Closed(3)
+                const rowHtml = keep.map(i => {
+                    let inner = cells[i].innerHTML.replace(/color:[^;"]+/g, 'color:#000').replace(/background:[^;"]+/g, 'background:#eee');
+                    if (i === 6) inner = inner.replace(/UNKNOWN\s*×\d+,?\s*/g, '').replace(/,\s*$/, '').trim();
+                    return `<td>${inner}</td>`;
+                }).join('');
+                rowsHtml += `<tr>${rowHtml}</tr>`;
+            });
+            const html = `<!DOCTYPE html><html><head><meta charset="utf-8"><title>Closed Containers — ${CONFIG.warehouseId}</title><style>
+body{font-family:Arial,Helvetica,sans-serif;margin:20px;color:#000}
+h2{font-size:16px;margin:0 0 4px 0}
+.meta{font-size:11px;color:#555;margin-bottom:12px}
+table{width:100%;border-collapse:collapse;font-size:11px}
+th{text-align:left;font-size:10px;text-transform:uppercase;padding:6px 8px;border-bottom:2px solid #333;background:#f5f5f5}
+td{padding:5px 8px;border-bottom:1px solid #ddd}
+tr:nth-child(even){background:#fafafa}
+.badge{display:inline-block;padding:1px 6px;border-radius:3px;font-size:10px;font-weight:bold;margin:1px}
+@media print{body{margin:10px}h2{font-size:14px}table{font-size:10px}}
+</style></head><body>
+<h2>📍 Locations with closed containers — ${CONFIG.warehouseId}</h2>
+<div class="meta">${ts} · ${shift.label} shift · ${closedRows.length} location${closedRows.length !== 1 ? 's' : ''}</div>
+<table><thead><tr><th>Location</th><th>Containers</th><th>Pkg</th><th>Dwell</th><th>Routes</th></tr></thead><tbody>${rowsHtml}</tbody></table></body></html>`;
+            const blob = new Blob([html], { type: 'text/html' });
+            const url = URL.createObjectURL(blob);
+            const printWin = window.open(url, '_blank');
+            if (!printWin) { URL.revokeObjectURL(url); return; }
+            printWin.addEventListener('afterprint', () => URL.revokeObjectURL(url));
+            printWin.onload = () => setTimeout(() => printWin.print(), 200);
+        });
 
         document.getElementById('handover-copy').onclick = () => {
             let text = `📋 SHIFT HANDOVER — ${CONFIG.warehouseId} ${shift.label}\n`;
