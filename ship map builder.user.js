@@ -197,6 +197,58 @@ function dwellTimeMinutes(isoStr) { if (!isoStr) return 0; try { const t = new D
 function dwellFromEpoch(epochSec) { if (!epochSec) return ''; const diff = Date.now() - epochSec * 1000; if (diff < 0) return ''; return formatDuration(diff); }
 function locSortPriority(label) { const u = label.toUpperCase(); if (/^(?:OB|IB)[-\s]?/.test(u)) return -1; if (/STAGE|HOT|GENERAL/.test(u)) return 0; if (/\bBG\b|BOX|^F(?:ST)?-/.test(u)) return 1; if (/SHIPPING|SLAM/.test(u)) return 3; return 2; }
 
+// Returns 'tots' for ATSWarehouseTransfers (TSO) routes, 'pkg' otherwise.
+// Accepts vrId or route string — checks FMC tour data for ATSWarehouseTransfers businessType/shipper.
+function pkgUnit(vrIdOrRoute) {
+    if (!vrIdOrRoute) return 'pkg';
+    const u = vrIdOrRoute.toUpperCase();
+    // Check FMC vrIdClassMap directly
+    if (typeof FMC !== 'undefined' && FMC._vrIdClassMap && FMC._vrIdClassMap.size) {
+        const entry = FMC._vrIdClassMap.get(u);
+        if (entry?.tour) {
+            const all = [...(entry.tour.businessTypesList || []), ...(entry.tour.shippers || [])];
+            if (all.some(s => s.toUpperCase().startsWith('ATSWAREHOUSETRANSFERS'))) return 'tots';
+        }
+    }
+    // Try matching by vrId from SSP loads
+    if (typeof State !== 'undefined' && State.sspLoads && typeof FMC !== 'undefined' && FMC._vrIdClassMap) {
+        // Direct vrId match in SSP
+        const loadByVr = State.sspLoads.find(l => l.vrId && l.vrId.toUpperCase() === u);
+        if (loadByVr?.vrId) {
+            const entry = FMC._vrIdClassMap.get(loadByVr.vrId.toUpperCase());
+            if (entry?.tour) {
+                const all = [...(entry.tour.businessTypesList || []), ...(entry.tour.shippers || [])];
+                if (all.some(s => s.toUpperCase().startsWith('ATSWAREHOUSETRANSFERS'))) return 'tots';
+            }
+        }
+        // Route match in SSP → get vrId → check FMC
+        const loadByRoute = State.sspLoads.find(l => {
+            const r = (l.route || '').toUpperCase();
+            const rr = (l.rawRoute || '').toUpperCase();
+            return r === u || rr === u || routeGroupKey(rr) === u || routeGroupKey(r) === u;
+        });
+        if (loadByRoute?.vrId) {
+            const entry = FMC._vrIdClassMap.get(loadByRoute.vrId.toUpperCase());
+            if (entry?.tour) {
+                const all = [...(entry.tour.businessTypesList || []), ...(entry.tour.shippers || [])];
+                if (all.some(s => s.toUpperCase().startsWith('ATSWAREHOUSETRANSFERS'))) return 'tots';
+            }
+        }
+    }
+    // Also check FMC tours directly by route
+    if (typeof FMC !== 'undefined' && FMC.tours) {
+        const tour = FMC.tours.find(t => {
+            const r = (t.route || '').toUpperCase();
+            return r === u || routeGroupKey(r) === u;
+        });
+        if (tour) {
+            const all = [...(tour.businessTypesList || []), ...(tour.shippers || [])];
+            if (all.some(s => s.toUpperCase().startsWith('ATSWAREHOUSETRANSFERS'))) return 'tots';
+        }
+    }
+    return 'pkg';
+}
+
 const YMS_RED_REASONS = new Set(['DAMAGED_MODERATE', 'DAMAGED_SEVERE', 'MISSING_DOCUMENTS', 'DAMAGED_LIGHT']);
 const YMS_YELLOW_REASONS = new Set(['PREVENTATIVE_MAINTENANCE', 'ADMINISTRATIVE_HOLD', 'PARTS_STORAGE']);
 function ymsGateStatus(ymsLoc) {
@@ -684,7 +736,7 @@ const SSP = {
             const parsed = { flat, packages, pallets, locations, stats:{ totalContainers:flat.length, packageCount:packages.length, palletCount:pallets.length, locationCount:locations.length, totalWeightKg:Math.round(totalWeight*100)/100 } };
             load._containers = parsed; load._containersLoading = false; load._expanded = true;
             State.setHighlight(loadIdx); UI.openDrawer(loadIdx); UI.updateDataPanel();
-            UI.setStatus(`📦 ${parsed.stats.packageCount} pkgs — ${load.vrId}`); return parsed;
+            UI.setStatus(`📦 ${parsed.stats.packageCount} ${pkgUnit(load.vrId)}s — ${load.vrId}`); return parsed;
         } catch (err) { load._containersLoading = false; load._expanded = false; UI.updateDataPanel(); UI.setStatus(`❌ ${err.message}`); return null; }
     },
     startAutoRefresh() { this.stopAutoRefresh(); this.fetchData(); State.autoRefreshTimer = setInterval(() => this.fetchData(), CONFIG.data.refreshInterval); },
@@ -2150,8 +2202,8 @@ const Summary = {
         t += '\n';
         t += `🏗️ YMS YARD: ${d.yms.total} trailers\n ∅ Empty: ${d.yms.empty} 📦 Full: ${d.yms.full} ⚠️ Unavail: ${d.yms.unavail}\n Utilization: ${d.yms.utilization}% (${d.yms.occupied}/${d.yms.totalLocs})\n`;
         for (const [owner, od] of d.yms.report) t += ` ${owner}: ${od.total} (∅${od.empty} 📦${od.full} ⚠${od.unavailable})\n`;
-        t += `\n📦 VISTA: ${d.vista.total} containers / ${d.vista.totalPkgs} pkgs\n 📥 Stacked: ${d.vista.stacked} 📤 Staged: ${d.vista.staged} 🚛 Loaded: ${d.vista.loaded}\n ⏱ Avg dwell: ${d.vista.avgDwell}m Max: ${d.vista.maxDwell}m\n 🟢${d.vista.congestion.low} 🟡${d.vista.congestion.medium} 🟠${d.vista.congestion.high} 🔴${d.vista.congestion.critical}\n\n`;
-        if (d.vista.topCongested.length) { t += `🔴 TOP CONGESTED:\n`; for (const [loc, ld] of d.vista.topCongested) t += ` ${loc}: ${ld.totalContainers} cnt / ${ld.totalPkgs} pkg / ${ld.maxDwell}m dwell\n`; t += '\n'; }
+        t += `\n📦 VISTA: ${d.vista.total} containers / ${d.vista.totalPkgs} items\n 📥 Stacked: ${d.vista.stacked} 📤 Staged: ${d.vista.staged} 🚛 Loaded: ${d.vista.loaded}\n ⏱ Avg dwell: ${d.vista.avgDwell}m Max: ${d.vista.maxDwell}m\n 🟢${d.vista.congestion.low} 🟡${d.vista.congestion.medium} 🟠${d.vista.congestion.high} 🔴${d.vista.congestion.critical}\n\n`;
+        if (d.vista.topCongested.length) { t += `🔴 TOP CONGESTED:\n`; for (const [loc, ld] of d.vista.topCongested) t += ` ${loc}: ${ld.totalContainers} cnt / ${ld.totalPkgs} items / ${ld.maxDwell}m dwell\n`; t += '\n'; }
         if (d.vista.topDwell.length) { t += `⏱ LONGEST DWELL:\n`; for (const [loc, ld] of d.vista.topDwell) t += ` ${loc}: ${ld.maxDwell}m / ${ld.totalContainers} cnt\n`; }
         t += `\n${'═'.repeat(50)}\nGenerated: ${d.now.toLocaleString()} | Ship Map v3.5.5`; return t;
     },
@@ -2581,7 +2633,7 @@ _drawElements() {
         if (type) lines.push({ text:type.label, color:type.color, font:'11px "Amazon Ember",Arial,sans-serif' });
         if (hl) {
             if (hl.ymsMatch && !hl.totalPkgs && !hl.loosePkgs && Object.keys(hl.containers).length === 0) { lines.push({ text:'── YMS MATCH ──', color:'#ff9900', font:'9px "Amazon Ember",Arial,sans-serif' }); lines.push({ text:`🚛 VR ID on ${hl.ymsLocCode || 'yard'}`, color:'#4fc3f7', font:'bold 11px "Amazon Ember",Arial,sans-serif' }); if (hl.ymsSource === 'annotation') lines.push({ text:'📝 found in annotation', color:'#ffd600', font:'10px "Amazon Ember",Arial,sans-serif' }); }
-            else { lines.push({ text:'── SSP ──', color:'#ff9900', font:'9px "Amazon Ember",Arial,sans-serif' }); if (hl.ymsMatch) lines.push({ text:`🚛 VR on ${hl.ymsLocCode||'yard'}${hl.ymsSource==='annotation'?' 📝':''}`, color:'#4fc3f7', font:'10px "Amazon Ember",Arial,sans-serif' }); if (hl.onlyLoose) lines.push({ text:`📬 ${hl.loosePkgs} dwelling`, color:'#90a4ae', font:'bold 11px "Amazon Ember",Arial,sans-serif' }); else { const TS = {'PALLET':'🛒Pal','GAYLORD':'📫Gay','BAG':'👜Bag','CART':'🛒Cart'}; const cp = Object.entries(hl.containers).map(([t2,n])=>`${TS[t2]||t2}:${n}`); if (cp.length) lines.push({ text:cp.join(' '), color:'#ffd600', font:'bold 11px "Amazon Ember",Arial,sans-serif' }); } lines.push({ text:`Î£ ${hl.totalPkgs}pkg · ${hl.totalWeight}kg`, color:hl.onlyLoose?'#90a4ae':'#ff9900', font:'bold 11px "Amazon Ember",Arial,sans-serif' }); }
+            else { lines.push({ text:'── SSP ──', color:'#ff9900', font:'9px "Amazon Ember",Arial,sans-serif' }); if (hl.ymsMatch) lines.push({ text:`🚛 VR on ${hl.ymsLocCode||'yard'}${hl.ymsSource==='annotation'?' 📝':''}`, color:'#4fc3f7', font:'10px "Amazon Ember",Arial,sans-serif' }); if (hl.onlyLoose) lines.push({ text:`📬 ${hl.loosePkgs} dwelling`, color:'#90a4ae', font:'bold 11px "Amazon Ember",Arial,sans-serif' }); else { const TS = {'PALLET':'🛒Pal','GAYLORD':'📫Gay','BAG':'👜Bag','CART':'🛒Cart'}; const cp = Object.entries(hl.containers).map(([t2,n])=>`${TS[t2]||t2}:${n}`); if (cp.length) lines.push({ text:cp.join(' '), color:'#ffd600', font:'bold 11px "Amazon Ember",Arial,sans-serif' }); } lines.push({ text:`Σ ${hl.totalPkgs}${pkgUnit(State.highlightedVrId)} · ${hl.totalWeight}kg`, color:hl.onlyLoose?'#90a4ae':'#ff9900', font:'bold 11px "Amazon Ember",Arial,sans-serif' }); }
         }
         const vistaData = State.vistaElementMap?.[el.name || el.id];
         if (vistaData && vistaData.totalContainers > 0) {
@@ -2598,7 +2650,7 @@ _drawElements() {
                 capText = `/ ${effMax.max} (${pct}%)${sourceTag}`;
             }
 
-            lines.push({ text:`${levelIcon} ${vistaData.totalContainers}${capText} containers · ${vistaData.totalPkgs} pkgs`, color: VISTA.getCongestionColor(level)?.fill || '#69f0ae', font:'bold 11px "Amazon Ember",Arial,sans-serif' });
+            lines.push({ text:`${levelIcon} ${vistaData.totalContainers}${capText} containers · ${vistaData.totalPkgs} ${Object.keys(vistaData.routes || {}).some(r => pkgUnit(r) === 'tots') ? 'tots' : 'pkgs'}`, color: VISTA.getCongestionColor(level)?.fill || '#69f0ae', font:'bold 11px "Amazon Ember",Arial,sans-serif' });
 
             const TS3 = {'PALLET':'🛒Pal','GAYLORD':'📫Gay','CART':'🛒Cart','BAG':'👜Bag'};
             const tp = Object.entries(vistaData.types).map(([t2,n]) => `${TS3[t2]||t2}:${n}`).join(' ');
@@ -2612,13 +2664,13 @@ _drawElements() {
                 lines.push({ text:`⏱ max dwell ${vistaData.maxDwell}m`, color:dwC, font:'10px "Amazon Ember",Arial,sans-serif' });
             }
 
-            if (vistaData.criticalCount > 0) lines.push({ text:`🚨 ${vistaData.criticalCount} critical pkgs`, color:'#ff1744', font:'bold 10px "Amazon Ember",Arial,sans-serif' });
+            if (vistaData.criticalCount > 0) lines.push({ text:`🚨 ${vistaData.criticalCount} critical ${Object.keys(vistaData.routes || {}).some(r => pkgUnit(r) === 'tots') ? 'tots' : 'pkgs'}`, color:'#ff1744', font:'bold 10px "Amazon Ember",Arial,sans-serif' });
 
             if (vistaData.routes) {
                 const routeEntries = Object.entries(vistaData.routes).sort((a, b) => b[1].count - a[1].count);
                 for (const [r2, d2] of routeEntries) {
                     const rShort = parseRoute(r2);
-                    lines.push({ text:`→ ${rShort} ×—${d2.count} (${d2.pkgs}pkg)`, color:'#546E7A', font:'9px "Amazon Ember",Arial,sans-serif' });
+                    lines.push({ text:`→ ${rShort} ×—${d2.count} (${d2.pkgs}${pkgUnit(r2)})`, color:'#546E7A', font:'9px "Amazon Ember",Arial,sans-serif' });
                 }
             }
         }
@@ -2653,7 +2705,7 @@ _drawElements() {
         const ymsLoc = State.getYmsForElement(el);
         if (ymsLoc?.yardAssets?.length) {
             lines.push({ text:'── YMS ──', color:'#5a6a7a', font:'9px "Amazon Ember",Arial,sans-serif' });
-            for (const asset of ymsLoc.yardAssets) { if (asset.type === 'TRACTOR') continue; const icon = TRAILER_LABELS[asset.type] || '🚛'; const plate = asset.licensePlateIdentifier?.registrationIdentifier || asset.vehicleNumber || '—'; const owner = asset.owner?.shortName || asset.broker?.shortName || ''; lines.push({ text:`${icon} ${plate} · ${owner} · ${asset.status||''}`, color:'#b0bec5', font:'11px "Amazon Ember",Arial,sans-serif' }); const vrIds = ymsGetVrIds(asset); if (vrIds.length) { const lane = asset.load?.lane || asset.load?.routes?.[0] || ''; lines.push({ text:`🔗 ${vrIds[0]}${lane ? ' → '+lane : ''}`, color:'#4fc3f7', font:'10px "Amazon Ember",Arial,sans-serif' }); } const atLoc = asset.datetimeOfArrivalAtLocation?.parsedValue; if (atLoc) lines.push({ text:`⏱ ${dwellFromEpoch(atLoc)}`, color:'#8899aa', font:'10px "Amazon Ember",Arial,sans-serif' }); if (asset.unavailable && asset.unavailableReason) { const color = YMS_RED_REASONS.has(asset.unavailableReason) ? '#ff5252' : '#ffd600'; lines.push({ text:`⚠️ ${asset.unavailableReason.replace(/_/g,' ')}`, color, font:'bold 10px "Amazon Ember",Arial,sans-serif' }); } if (asset.annotation) { let ann = asset.annotation.replace(/\n/g,' ').trim(); if (ann.length > 55) ann = ann.substring(0,52)+'…'; lines.push({ text:`📝 ${ann}`, color:'#78909C', font:'9px "Amazon Ember",Arial,sans-serif' }); } }
+            for (const asset of ymsLoc.yardAssets) { if (asset.type === 'TRACTOR') continue; const icon = TRAILER_LABELS[asset.type] || '🚛'; const plate = asset.licensePlateIdentifier?.registrationIdentifier || asset.vehicleNumber || '—'; const owner = asset.owner?.shortName || asset.broker?.shortName || ''; lines.push({ text:`${icon} ${plate} · ${owner} · ${asset.status||''}`, color:'#b0bec5', font:'11px "Amazon Ember",Arial,sans-serif' }); const vrIds = ymsGetVrIds(asset); if (vrIds.length) { const lane = asset.load?.lane || asset.load?.routes?.[0] || ''; lines.push({ text:`🔗 ${vrIds[0]}${lane ? ' → '+lane : ''}`, color:'#4fc3f7', font:'10px "Amazon Ember",Arial,sans-serif' }); } const isaIds = (asset.load?.identifiers || []).filter(id => id.type === 'ISA' && id.identifier).map(id => id.identifier.toUpperCase()); if (isaIds.length) lines.push({ text:`🏷️ ISA: ${isaIds.join(', ')}`, color:'#ce93d8', font:'10px "Amazon Ember",Arial,sans-serif' }); const atLoc = asset.datetimeOfArrivalAtLocation?.parsedValue; if (atLoc) lines.push({ text:`⏱ ${dwellFromEpoch(atLoc)}`, color:'#8899aa', font:'10px "Amazon Ember",Arial,sans-serif' }); if (asset.unavailable && asset.unavailableReason) { const color = YMS_RED_REASONS.has(asset.unavailableReason) ? '#ff5252' : '#ffd600'; lines.push({ text:`⚠️ ${asset.unavailableReason.replace(/_/g,' ')}`, color, font:'bold 10px "Amazon Ember",Arial,sans-serif' }); } if (asset.annotation) { let ann = asset.annotation.replace(/\n/g,' ').trim(); if (ann.length > 55) ann = ann.substring(0,52)+'…'; lines.push({ text:`📝 ${ann}`, color:'#78909C', font:'9px "Amazon Ember",Arial,sans-serif' }); } }
         }
         // Draw tooltip box
         const lH = 16, pX = 12, pY = 8; let maxW = 0; for (const l of lines) { ctx.font = l.font; const w = ctx.measureText(l.text).width; if (w > maxW) maxW = w; }
@@ -3652,7 +3704,7 @@ select.tsel{background:#37475a;color:#e0e0e0;border:1px solid #4a5a6a;padding:4p
             var locsHtml = '';
             for (var lli = 0; lli < locs.length; lli++) {
                 var matched = State.elements.some(function(el) { return matchElement(el, locs[lli][0]); });
-                locsHtml += '<div style="padding:2px 10px 2px 20px;font-size:9px;color:#78909C;cursor:pointer" data-vloc="' + locs[lli][0] + '">' + (matched ? '\u2705' : '\u274C') + ' ' + locs[lli][0] + ' \u00B7 ' + locs[lli][1].count + ' cnt \u00B7 ' + locs[lli][1].pkgs + ' pkg</div>';
+                locsHtml += '<div style="padding:2px 10px 2px 20px;font-size:9px;color:#78909C;cursor:pointer" data-vloc="' + locs[lli][0] + '">' + (matched ? '\u2705' : '\u274C') + ' ' + locs[lli][0] + ' \u00B7 ' + locs[lli][1].count + ' cnt \u00B7 ' + locs[lli][1].pkgs + ' ' + pkgUnit(g.key) + '</div>';
             }
 
             html += '<div class="fmc-tour-item" data-vrkey="' + g.key + '">'
@@ -3660,7 +3712,7 @@ select.tsel{background:#37475a;color:#e0e0e0;border:1px solid #4a5a6a;padding:4p
                 + '<span class="load-expand-icon">\u25B6</span>'
                 + '<span class="fmc-tour-route">' + g.key + '</span>'
                 + '<span style="font-family:monospace;font-weight:bold;color:' + congC + ';min-width:28px;text-align:right">' + g.totalContainers + '</span>'
-                + '<span style="font-size:9px;color:#8899aa;min-width:40px;text-align:right">' + g.totalPkgs + 'pkg</span>'
+                + '<span style="font-size:9px;color:#8899aa;min-width:40px;text-align:right">' + g.totalPkgs + pkgUnit(g.key) + '</span>'
                 + (g.maxDwell > 0 ? '<span style="font-size:9px;font-family:monospace;color:' + dwC + '">' + g.maxDwell + 'm</span>' : '')
                 + '</div>'
                 + '<div style="display:flex;gap:2px;flex-wrap:wrap;margin:2px 8px;font-size:9px">' + types + '</div>'
@@ -4337,7 +4389,7 @@ ${eyeBtn}
         });
 
         const s = data.stats;
-        document.getElementById('drawer-summary').innerHTML = `📦<strong>${s.packageCount}</strong>pkg · 🛒<strong>${s.palletCount}</strong>pal · 📍<strong>${s.locationCount}</strong>loc · ⚖️<strong>${s.totalWeightKg}</strong>kg`;
+        document.getElementById('drawer-summary').innerHTML = `📦<strong>${s.packageCount}</strong>${pkgUnit(load.vrId)} · 🛒<strong>${s.palletCount}</strong>pal · 📍<strong>${s.locationCount}</strong>loc · ⚖️<strong>${s.totalWeightKg}</strong>kg`;
 
         const TS = { 'PALLET': 'Pal', 'GAYLORD': 'Gay', 'BAG': 'Bag', 'CART': 'Cart', 'CAGE': 'Cage', 'ROLL_CONTAINER': 'Roll' };
         const TC = { 'PALLET': 'dr-pal', 'GAYLORD': 'dr-gaylord', 'BAG': 'dr-bag', 'CART': 'dr-cart', 'CAGE': 'dr-cage', 'ROLL_CONTAINER': 'dr-roll' };
@@ -4380,17 +4432,17 @@ ${eyeBtn}
                 for (const [t2, n] of Object.entries(gg)) content += `<span class="dr-badge ${TC[t2] || 'dr-other'}">${n}${TS[t2] || t2}</span>`;
                 const tl = Object.values(gg).reduce((s2, n) => s2 + n, 0);
                 if (tl === 0 && gp === 0 && dc.length > 0) content += `<span style="font-size:9px;color:#5a6a7a">🚛attached</span>`;
-                if (gp > 0) content += `<span class="dr-badge dr-pkg">${gp}pkg</span>`;
+                if (gp > 0) content += `<span class="dr-badge dr-pkg">${gp}${pkgUnit(load.vrId)}</span>`;
                 contentCount = tl + gp;
             } else {
                 for (const [t2, n] of Object.entries(groups)) content += `<span class="dr-badge ${TC[t2] || 'dr-other'}">${n}${TS[t2] || t2}</span>`;
-                if (loosePkgs > 0) content += `<span class="dr-badge dr-pkg">${loosePkgs}pkg${isDwell ? '📬' : ''}</span>`;
+                if (loosePkgs > 0) content += `<span class="dr-badge dr-pkg">${loosePkgs}${pkgUnit(load.vrId)}${isDwell ? '📬' : ''}</span>`;
                 if (emptyCount > 0) content += `<span class="dr-badge dr-empty">⚠${emptyCount}∅</span>`;
             }
 
             if (!dc.length) content = `<span style="color:#5a6a7a;font-size:9px">∅</span>`;
             if (totalW > 0) content += `<span style="font-size:9px;color:#5a6a7a;margin-left:2px">${Math.round(totalW)}kg</span>`;
-            if (!isGate && contentCount > 0 && contentCount < 20) content += `<span style="font-size:8px;color:#ff9800;margin-left:2px">⚠${contentCount}pkg</span>`;
+            if (!isGate && contentCount > 0 && contentCount < 20) content += `<span style="font-size:8px;color:#ff9800;margin-left:2px">⚠${contentCount}${pkgUnit(load.vrId)}</span>`;
 
             const sfMap = {};
             for (const c2 of dc) {
@@ -4466,12 +4518,12 @@ ${eyeBtn}
                     const cTypes = Object.entries(cd.types).map(([t, n]) => `${n}${TS[t] || t}`).join('+');
                     return `<span class="dr-cpt-badge">${cpt} <span class="dr-cpt-cnt">${cTypes}</span></span>`;
                 }).join('');
-                return `<tr class="${matched ? 'dr-matched' : 'dr-unmatched'}" data-loc="${loc}"><td><span class="dr-loc">${loc}</span></td><td><div class="dr-content">${typeBadges}<span style="font-size:9px;color:#5a6a7a;margin-left:2px">${vd.totalPkgs}pkg</span></div><div class="dr-cpt-row">${cptBadges}</div></td><td class="dr-dwell-cell ${dwC}">${dwStr}</td></tr>`;
+                return `<tr class="${matched ? 'dr-matched' : 'dr-unmatched'}" data-loc="${loc}"><td><span class="dr-loc">${loc}</span></td><td><div class="dr-content">${typeBadges}<span style="font-size:9px;color:#5a6a7a;margin-left:2px">${vd.totalPkgs}${pkgUnit(load.vrId)}</span></div><div class="dr-cpt-row">${cptBadges}</div></td><td class="dr-dwell-cell ${dwC}">${dwStr}</td></tr>`;
             }).join('');
 
             const grandTypesStr = Object.entries(vistaGrandTotal).map(([t, n]) => `<span class="dr-badge ${TC[t] || 'dr-other'}">${n}${TS[t] || t}</span>`).join('');
 
-            vistaHtml = `<div class="other-cpt-section"><div class="other-cpt-header" id="other-cpt-toggle"><span>📦 Other CPTs on stages for <b>${load.route}</b> · ${vistaGrandCnt} cnt</span><span class="other-cpt-count">${vistaLocs.length}</span></div><div class="other-cpt-body" id="other-cpt-body" style="display:none"><table class="dtable"><thead><tr><th>Location</th><th>Content &amp; CPT</th><th>Dwell</th></tr></thead><tbody>${vistaTableRows}<tr class="vista-total-row"><td style="font-weight:bold;color:#ff9900">TOTAL</td><td><div class="dr-content">${grandTypesStr}<span style="font-size:9px;color:#ff9900;margin-left:4px">${vistaGrandPkgs}pkg</span></div></td><td></td></tr></tbody></table></div></div>`;
+            vistaHtml = `<div class="other-cpt-section"><div class="other-cpt-header" id="other-cpt-toggle"><span>📦 Other CPTs on stages for <b>${load.route}</b> · ${vistaGrandCnt} cnt</span><span class="other-cpt-count">${vistaLocs.length}</span></div><div class="other-cpt-body" id="other-cpt-body" style="display:none"><table class="dtable"><thead><tr><th>Location</th><th>Content &amp; CPT</th><th>Dwell</th></tr></thead><tbody>${vistaTableRows}<tr class="vista-total-row"><td style="font-weight:bold;color:#ff9900">TOTAL</td><td><div class="dr-content">${grandTypesStr}<span style="font-size:9px;color:#ff9900;margin-left:4px">${vistaGrandPkgs}${pkgUnit(load.vrId)}</span></div></td><td></td></tr></tbody></table></div></div>`;
         }
 
         // ── STEM Chutes matching this load's route ──
@@ -4977,12 +5029,12 @@ ${sspMisses.length ? `<div class="handover-section">
 </table></div></div>` : ''}
 
 ${vistaMisses.length ? `<div class="handover-section">
-<h3 style="color:#ff1744">📦 Vista Missed CPT (${vistaMissTotal} containers · ${vistaMissTotalPkgs} pkg)
+<h3 style="color:#ff1744">📦 Vista Missed CPT (${vistaMissTotal} containers · ${vistaMissTotalPkgs} items)
 <span style="font-size:10px;color:#8899aa;font-weight:normal">CPT + 30min passed, not loaded</span>
 </h3>
 ${vistaMisses.map(r => `<div style="margin-bottom:10px">
 <div style="font-size:11px;font-weight:bold;color:#ff9900;margin-bottom:4px;display:flex;align-items:center;gap:8px">
-→ ${r.route} <span style="color:#ff1744;font-size:10px">${r.totalContainers} cnt · ${r.totalPkgs} pkg</span>
+→ ${r.route} <span style="color:#ff1744;font-size:10px">${r.totalContainers} cnt · ${r.totalPkgs} ${pkgUnit(r.route)}</span>
 </div>
 <div style="overflow-x:auto;border:1px solid rgba(255,23,68,0.2);border-radius:6px">
 <table class="handover-loc-table">
