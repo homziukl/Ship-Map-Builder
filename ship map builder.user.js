@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Ship Map Builder
 // @namespace    http://tampermonkey.net/
-// @version      3.5.5
+// @version      3.5.6
 // @description  Ship Map + SSP + YMS + Vista + FMC + STEM integration
 // @author       homziukl
 // @match        https://stem-eu.corp.amazon.com/url*
@@ -296,7 +296,8 @@ function ymsGetNonInvAssets() {
                 annotation: asset.annotation || '',
                 arrivalEpoch: asset.datetimeOfArrivalAtLocation || null,
                 routes: asset.load?.routes || [],
-                lane: asset.load?.lane || ''
+                lane: asset.load?.lane || '',
+                isaIds: (asset.load?.identifiers || []).filter(id => id.type === 'ISA' && id.identifier).map(id => id.identifier.toUpperCase())
             });
         }
     }
@@ -612,7 +613,7 @@ const State = {
         for (const el of this.elements) {
             const elKey = (el.name || el.id).toUpperCase(); if (elKey.includes(q)) { this.mapSearchMatches.add(el.id); continue; }
             const ymsLoc = this.getYmsForElement(el);
-            if (ymsLoc?.yardAssets?.length) { let found = false; for (const asset of ymsLoc.yardAssets) { if (asset.type === 'TRACTOR') continue; const owner = (asset.owner?.code || asset.owner?.shortName || asset.broker?.code || '').toUpperCase(); const plate = (asset.licensePlateIdentifier?.registrationIdentifier || asset.vehicleNumber || '').toUpperCase(); const atype = (asset.type || '').toUpperCase().replace(/_/g, ' '); const ann = (asset.annotation || '').toUpperCase(); const vrIds = ymsGetVrIds(asset); const lane = (asset.load?.lane || asset.load?.routes?.[0] || '').toUpperCase(); if (owner.includes(q) || plate.includes(q) || atype.includes(q) || ann.includes(q) || lane.includes(q) || vrIds.some(v => v.includes(q))) { found = true; break; } } if (found) { this.mapSearchMatches.add(el.id); continue; } }
+            if (ymsLoc?.yardAssets?.length) { let found = false; for (const asset of ymsLoc.yardAssets) { if (asset.type === 'TRACTOR') continue; const owner = (asset.owner?.code || asset.owner?.shortName || asset.broker?.code || '').toUpperCase(); const plate = (asset.licensePlateIdentifier?.registrationIdentifier || asset.vehicleNumber || '').toUpperCase(); const atype = (asset.type || '').toUpperCase().replace(/_/g, ' '); const ann = (asset.annotation || '').toUpperCase(); const vrIds = ymsGetVrIds(asset); const lane = (asset.load?.lane || asset.load?.routes?.[0] || '').toUpperCase(); const isaIds = (asset.load?.identifiers || []).filter(id => id.type === 'ISA' && id.identifier).map(id => id.identifier.toUpperCase()); if (owner.includes(q) || plate.includes(q) || atype.includes(q) || ann.includes(q) || lane.includes(q) || vrIds.some(v => v.includes(q)) || isaIds.some(v => v.includes(q))) { found = true; break; } } if (found) { this.mapSearchMatches.add(el.id); continue; } }
             const vd = this.vistaElementMap?.[el.name || el.id]; if (vd?.routes) { let found = false; for (const route of Object.keys(vd.routes)) { const routeShort = parseRoute(route).toUpperCase(); if (routeShort.includes(q) || route.toUpperCase().includes(q)) { found = true; break; } } if (found) { this.mapSearchMatches.add(el.id); continue; } }
             const sd = this.stemElementMap?.[el.name || el.id]; if (sd) { const dir = (sd.direction || '').toUpperCase(); const allDirs = (sd.allDirections || []).join(' ').toUpperCase(); const login = (sd.userLogin || '').toUpperCase(); if (dir.includes(q) || allDirs.includes(q) || login.includes(q) || (sd.chuteLabel || '').toUpperCase().includes(q)) { this.mapSearchMatches.add(el.id); continue; } }
         }
@@ -2205,7 +2206,7 @@ const Summary = {
         t += `\n📦 VISTA: ${d.vista.total} containers / ${d.vista.totalPkgs} items\n 📥 Stacked: ${d.vista.stacked} 📤 Staged: ${d.vista.staged} 🚛 Loaded: ${d.vista.loaded}\n ⏱ Avg dwell: ${d.vista.avgDwell}m Max: ${d.vista.maxDwell}m\n 🟢${d.vista.congestion.low} 🟡${d.vista.congestion.medium} 🟠${d.vista.congestion.high} 🔴${d.vista.congestion.critical}\n\n`;
         if (d.vista.topCongested.length) { t += `🔴 TOP CONGESTED:\n`; for (const [loc, ld] of d.vista.topCongested) t += ` ${loc}: ${ld.totalContainers} cnt / ${ld.totalPkgs} items / ${ld.maxDwell}m dwell\n`; t += '\n'; }
         if (d.vista.topDwell.length) { t += `⏱ LONGEST DWELL:\n`; for (const [loc, ld] of d.vista.topDwell) t += ` ${loc}: ${ld.maxDwell}m / ${ld.totalContainers} cnt\n`; }
-        t += `\n${'═'.repeat(50)}\nGenerated: ${d.now.toLocaleString()} | Ship Map v3.5.5`; return t;
+        t += `\n${'═'.repeat(50)}\nGenerated: ${d.now.toLocaleString()} | Ship Map v3.5.6`; return t;
     },
 
 };
@@ -3451,6 +3452,7 @@ select.tsel{background:#37475a;color:#e0e0e0;border:1px solid #4a5a6a;padding:4p
         var detailRows = '';
         detailRows += '<div class="fmc-tour-detail-row"><span class="fmc-tour-detail-label">Location</span><span class="fmc-tour-detail-val" style="color:#e040fb;font-weight:bold">' + yo.locationCode + '</span></div>';
         if (yo.vrId) detailRows += '<div class="fmc-tour-detail-row"><span class="fmc-tour-detail-label">VR ID</span><span class="fmc-tour-detail-val" style="color:#4fc3f7;cursor:pointer" data-copy="' + yo.vrId + '">' + yo.vrId + '</span><a href="https://trans-logistics-eu.amazon.com/fmc/execution/search/' + yo.vrId + '" target="_blank" rel="noopener" title="Open in FMC" style="margin-left:4px;text-decoration:none;font-size:11px" onclick="event.stopPropagation()">🚛</a></div>';
+        if (yo.isaIds && yo.isaIds.length) detailRows += '<div class="fmc-tour-detail-row"><span class="fmc-tour-detail-label">ISA</span><span class="fmc-tour-detail-val" style="color:#ce93d8;cursor:pointer" data-copy="' + yo.isaIds.join(', ') + '">🏷️ ' + yo.isaIds.join(', ') + '</span></div>';
         detailRows += '<div class="fmc-tour-detail-row"><span class="fmc-tour-detail-label">Plate</span><span class="fmc-tour-detail-val">' + yo.plate + '</span></div>';
         detailRows += '<div class="fmc-tour-detail-row"><span class="fmc-tour-detail-label">Owner</span><span class="fmc-tour-detail-val">' + yo.owner + '</span></div>';
         detailRows += '<div class="fmc-tour-detail-row"><span class="fmc-tour-detail-label">Shipper</span><span class="fmc-tour-detail-val" style="color:#ff9900">' + yo.shipperLabel + '</span></div>';
@@ -3463,7 +3465,7 @@ select.tsel{background:#37475a;color:#e0e0e0;border:1px solid #4a5a6a;padding:4p
         var displayName = yo.shipperLabel.replace(/Transfers/g, '').replace(/Empty/g, '∅');
         if (cartCount) displayName += ' · ' + cartCount;
 
-        return '<div class="fmc-tour-item yms-orphan-item" data-orphan-loc="' + yo.locationCode + '" data-orphan-vrid="' + (yo.vrId || '') + '" style="border-left:3px solid #ff1744">'
+        return '<div class="fmc-tour-item yms-orphan-item" data-orphan-loc="' + yo.locationCode + '" data-orphan-vrid="' + (yo.vrId || '') + '" data-orphan-isa="' + (yo.isaIds || []).join(',') + '" style="border-left:3px solid #ff1744">'
             + '<div class="fmc-tour-header">'
             + '<span class="load-expand-icon">\u25B6</span>'
             + '<span class="fmc-tour-route" style="color:#ff1744">\uD83D\uDEA8 ' + displayName + '</span>'
@@ -3547,10 +3549,10 @@ select.tsel{background:#37475a;color:#e0e0e0;border:1px solid #4a5a6a;padding:4p
 
         var trailerUpper = (apt.trailerNumber || '').toUpperCase();
 
-        return '<div class="fmc-tour-item dm-item" data-dm-trailer="' + trailerUpper + '" data-dm-id="' + apt.appointmentId + '">'
+        return '<div class="fmc-tour-item dm-item" data-dm-trailer="' + trailerUpper + '" data-dm-id="' + apt.appointmentId + '" data-dm-shipments="' + (apt.shipmentIds || []).map(function(s){return s.toUpperCase()}).join(',') + '">'
             + '<div class="fmc-tour-header">'
             + '<span class="load-expand-icon">\u25B6</span>'
-            + '<span class="fmc-tour-route">' + displayName + '</span>'
+            + '<span class="fmc-tour-route"><span style="color:#4fc3f7;font-weight:bold;font-size:9px">[DM]</span> ' + displayName + '</span>'
             + loadTypeHtml
             + '<span class="fmc-tour-status" style="background:' + sc + ';color:#000">' + ss + '</span>'
             + '<span class="fmc-tour-time">\uD83D\uDCE5' + schedTime + '</span>'
@@ -4049,18 +4051,7 @@ ${eyeBtn}
                 item.classList.toggle('expanded', !wasOpen);
                 if (icon) icon.textContent = wasOpen ? '\u25B6' : '\u25BC';
                 if (!wasOpen) {
-                    var trailer = item.dataset.dmTrailer;
-                    if (trailer) {
-                        for (var li = 0; li < State.ymsLocations.length; li++) {
-                            var loc = State.ymsLocations[li];
-                            for (var ai = 0; ai < (loc.yardAssets || []).length; ai++) {
-                                var asset = loc.yardAssets[ai];
-                                var plate = (asset.licensePlateIdentifier && asset.licensePlateIdentifier.registrationIdentifier || asset.vehicleNumber || '').toUpperCase();
-                                if (plate === trailer) { self._highlightFmcOnMap(ymsGetVrIds(asset)[0] || ''); return; }
-                            }
-                        }
-                    }
-                    State.clearHighlight(); R.render();
+                    self._highlightDmItemOnMap(item);
                 } else { State.clearHighlight(); R.render(); }
             });
             // Copy support for DM detail values
@@ -4095,7 +4086,7 @@ ${eyeBtn}
                         }
                         State.highlightData = hd;
                         State.highlightedLoadIdx = -1;
-                        State.highlightedVrId = item.dataset.orphanVrid || null;
+                        State.highlightedVrId = item.dataset.orphanVrid || (item.dataset.orphanIsa || '').split(',').filter(Boolean)[0] || null;
                         State._startPulse();
                         R.render();
                     }
@@ -4208,18 +4199,7 @@ ${eyeBtn}
                 item.classList.toggle('expanded', !wasOpen);
                 if (icon) icon.textContent = wasOpen ? '\u25B6' : '\u25BC';
                 if (!wasOpen) {
-                    var trailer = item.dataset.dmTrailer;
-                    if (trailer) {
-                        for (var li = 0; li < State.ymsLocations.length; li++) {
-                            var loc = State.ymsLocations[li];
-                            for (var ai = 0; ai < (loc.yardAssets || []).length; ai++) {
-                                var asset = loc.yardAssets[ai];
-                                var plate = (asset.licensePlateIdentifier && asset.licensePlateIdentifier.registrationIdentifier || asset.vehicleNumber || '').toUpperCase();
-                                if (plate === trailer) { self._highlightFmcOnMap(ymsGetVrIds(asset)[0] || ''); return; }
-                            }
-                        }
-                    }
-                    State.clearHighlight(); R.render();
+                    self._highlightDmItemOnMap(item);
                 } else { State.clearHighlight(); R.render(); }
             });
         });
@@ -4272,7 +4252,7 @@ ${eyeBtn}
             ${(() => { const ac = RELAT.getAssetCounts(tour.vrId, tour.facilitySeq); if (!ac) return '<div class="fmc-tour-detail-row"><span class="fmc-tour-detail-label">Loaded</span><span class="fmc-tour-detail-val" style="color:#5a6a7a">N/A</span></div>'; return `<div class="fmc-tour-detail-row"><span class="fmc-tour-detail-label">Loaded</span><span class="fmc-tour-detail-val" style="color:#69f0ae;font-weight:bold">${ac.counts || 'N/A'}</span></div>` + (ac.updatedBy ? `<div class="fmc-tour-detail-row"><span class="fmc-tour-detail-label">Counted by</span><span class="fmc-tour-detail-val" style="color:#78909C">${ac.updatedBy}</span></div>` : ''); })()}
         </div>`;
         const isPlanned = tour.tourStatus === 'PLANNED';
-        return `<div class="fmc-tour-item ${isPlanned ? 'fmc-planned-warn' : ''}" data-fmc-vrid="${vrId}"><div class="fmc-tour-header"><span class="load-expand-icon">▶</span><span class="fmc-tour-route" title="${tour.facilitySeq}">${displayName}</span>${eqBadge}<span class="fmc-tour-status" style="background:${sc};color:#000">${ss}</span>${isPlanned ? '<span style="font-size:8px;color:#ffd600;font-weight:bold;flex-shrink:0">🟡PLN</span>' : ''}<span class="fmc-tour-time">${timeLabel}</span>${delayBadge}${dwellBadge}${ymsBadge}<span class="fmc-tour-carrier">${tour.carrier || ''}</span></div>${detail}</div>`;
+        return `<div class="fmc-tour-item ${isPlanned ? 'fmc-planned-warn' : ''}" data-fmc-vrid="${vrId}"><div class="fmc-tour-header"><span class="load-expand-icon">▶</span><span class="fmc-tour-route" title="${tour.facilitySeq}">${showShipper ? '<span style="color:#e040fb;font-weight:bold;font-size:9px">[FMC]</span> ' : ''}${displayName}</span>${eqBadge}<span class="fmc-tour-status" style="background:${sc};color:#000">${ss}</span>${isPlanned ? '<span style="font-size:8px;color:#ffd600;font-weight:bold;flex-shrink:0">🟡PLN</span>' : ''}<span class="fmc-tour-time">${timeLabel}</span>${delayBadge}${dwellBadge}${ymsBadge}<span class="fmc-tour-carrier">${tour.carrier || ''}</span></div>${detail}</div>`;
     },
 
 
@@ -4311,6 +4291,35 @@ ${eyeBtn}
             }
         }
         State.highlightData = hd; State.highlightedLoadIdx = -1; State.highlightedVrId = vu; State._startPulse(); R.render();
+    },
+
+    // Highlight DM appointment on map — tries trailer plate → VR ID → ISA identifiers → shipmentIds
+    _highlightDmItemOnMap(dmItemEl) {
+        var trailer = dmItemEl.dataset.dmTrailer;
+        // 1) Try matching by trailer plate in YMS → get VR ID or ISA from asset
+        if (trailer) {
+            for (var li = 0; li < State.ymsLocations.length; li++) {
+                var loc = State.ymsLocations[li];
+                for (var ai = 0; ai < (loc.yardAssets || []).length; ai++) {
+                    var asset = loc.yardAssets[ai];
+                    var plate = (asset.licensePlateIdentifier && asset.licensePlateIdentifier.registrationIdentifier || asset.vehicleNumber || '').toUpperCase();
+                    if (plate === trailer) {
+                        var vrId = ymsGetVrIds(asset)[0] || '';
+                        if (vrId) { this._highlightFmcOnMap(vrId); return; }
+                        // No VR ID — try ISA identifiers from the YMS asset
+                        var assetIsaIds = (asset.load && asset.load.identifiers || []).filter(function(id) { return id.type === 'ISA' && id.identifier; }).map(function(id) { return id.identifier.toUpperCase(); });
+                        if (assetIsaIds.length) { this._highlightFmcOnMap(assetIsaIds[0]); return; }
+                    }
+                }
+            }
+        }
+        // 2) Fallback: try shipmentIds (ISA codes from Dockmaster) directly in YMS vrIdMap
+        var shipments = (dmItemEl.dataset.dmShipments || '').split(',').filter(Boolean);
+        for (var si = 0; si < shipments.length; si++) {
+            var hits = State.findYmsForVrId(shipments[si]);
+            if (hits && hits.length) { this._highlightFmcOnMap(shipments[si]); return; }
+        }
+        State.clearHighlight(); R.render();
     },
 
     // ═══════════════════════════════════════════════════
@@ -6326,7 +6335,7 @@ function bootMain() {
     R.init('cvs');
     R.render();
     UI.refreshList();
-    UI.setStatus(`✅ v3.5.5 | ${State.elements.length} el | ${State.editMode ? '🔓' : '🔒'}`);
+    UI.setStatus(`✅ v3.5.6 | ${State.elements.length} el | ${State.editMode ? '🔓' : '🔒'}`);
     try { Minimap.init(); } catch(e) { console.warn('[Minimap] init failed:', e); }
     try { GitSync.init(); } catch(e) { console.warn('[GitSync] init failed:', e); }
 try { unsafeWindow.__SM = { State, YMS, FMC, Dockmaster, RELAT, MapManager, MatchIndex, ymsGetVrIds }; } catch(e) {}
