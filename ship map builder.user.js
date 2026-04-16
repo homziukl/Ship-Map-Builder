@@ -1016,7 +1016,19 @@ const VISTA = {
         try {
             const [stacked, staged, loaded] = await Promise.all([ this._postForm(CONFIG.vistaUrl, this._buildBody('Stacked')), this._postForm(CONFIG.vistaUrl, this._buildBody('Staged')), this._postForm(CONFIG.vistaUrl, this._buildBody('Loaded')) ]);
             const extract = (resp) => { const groups = resp?.ret?.getContainersDetailByCriteriaOutput?.containerDetails || []; const all = []; for (const group of groups) { if (group?.containerDetails) { all.push(...group.containerDetails); } } return all; };
-            const all = [ ...extract(stacked).map(c => ({...c, _state:'Stacked'})), ...extract(staged).map(c => ({...c, _state:'Staged'})), ...extract(loaded).map(c => ({...c, _state:'Loaded'})) ];
+            const allRaw = [ ...extract(stacked).map(c => ({...c, _state:'Stacked'})), ...extract(staged).map(c => ({...c, _state:'Staged'})), ...extract(loaded).map(c => ({...c, _state:'Loaded'})) ];
+            // Filter out: 1) containers with UNKNOWN location/sort-code  2) closed containers with location but no content (childCount <= 0)
+            const all = allRaw.filter(c => {
+                const loc = (c.location || '').toUpperCase();
+                const route = (c.route || '').toUpperCase();
+                // Skip containers where both location and route are unknown/empty
+                if ((!loc || loc === 'UNKNOWN') && (!route || route === 'UNKNOWN')) return false;
+                // Skip containers with UNKNOWN location (no sort-code)
+                if (!loc || loc === 'UNKNOWN') return false;
+                // Skip closed containers that have a location but zero content
+                if ((c.isClosed || c.closed) && (!c.childCount || c.childCount <= 0)) return false;
+                return true;
+            });
             const locMap = {};
             for (const c of all) { const loc = c.location || 'UNKNOWN'; if (!locMap[loc]) locMap[loc] = { location:loc, locationType:c.locationType, containers:[], totalPkgs:0, totalContainers:0, types:{}, states:{}, routes:{}, maxDwell:0, totalDwell:0, criticalCpt:null, criticalCount:0 }; const g = locMap[loc]; g.containers.push(c); g.totalContainers++; g.totalPkgs += c.childCount || 0; g.types[c.type] = (g.types[c.type] || 0) + 1; g.states[c._state] = (g.states[c._state] || 0) + 1; const route = c.route || 'unknown'; if (!g.routes[route]) g.routes[route] = {count:0,pkgs:0}; g.routes[route].count++; g.routes[route].pkgs += c.childCount || 0; if (c.dwellTimeInMinutes > g.maxDwell) g.maxDwell = c.dwellTimeInMinutes; g.totalDwell += c.dwellTimeInMinutes || 0; if (c.criticalPackages > 0) g.criticalCount += c.criticalPackages; if (c.cpt) { if (!g.criticalCpt || c.cpt < g.criticalCpt) g.criticalCpt = c.cpt; } }
             State.vistaContainers = all; State.vistaLocMap = locMap; State.vistaLastUpdated = new Date(); State.vistaLoading = false;
@@ -4951,33 +4963,7 @@ openTrend() {
         }
         sspMisses.sort((a, b) => b.overdueMins - a.overdueMins);
 
-        // ── VISTA MISS TRACKER ──
-        const now = Date.now();
-        const vistaMissMap = {};
-        for (const c of State.vistaContainers) {
-            if (c._state === 'Loaded') continue;
-            if (!c.cpt) continue;
-            if (!c.childCount || c.childCount <= 1) continue;
-            if (!c.isClosed && !c.closed) continue;
-            let cptMs;
-            try {
-                cptMs = typeof c.cpt === 'number' ? c.cpt : new Date(c.cpt).getTime();
-                if (isNaN(cptMs)) continue;
-                if (cptMs < 1e12) cptMs = cptMs * 1000;
-            } catch { continue; }
-            if (now - cptMs < 30 * 60000) continue;
-            const overdueMins = Math.floor((now - cptMs) / 60000);
-            const route = c.route ? routeGroupKey(c.route) : 'UNKNOWN';
-            const containerName = c.id || c.type || '—';
-            if (!vistaMissMap[route]) vistaMissMap[route] = [];
-            vistaMissMap[route].push({ containerName, type: c.type, childCount: c.childCount, location: c.location || '—', state: c._state, overdueMins, cptMs });
-        }
-
-        const vistaMisses = Object.entries(vistaMissMap)
-            .sort((a, b) => b[1].length - a[1].length)
-            .map(([route, containers]) => ({ route, containers: containers.sort((a, b) => b.overdueMins - a.overdueMins), totalPkgs: containers.reduce((s, c) => s + c.childCount, 0), totalContainers: containers.length }));
-        const vistaMissTotal = vistaMisses.reduce((s, r) => s + r.totalContainers, 0);
-        const vistaMissTotalPkgs = vistaMisses.reduce((s, r) => s + r.totalPkgs, 0);
+        // ── VISTA MISS TRACKER — disabled until Tantei/Troubleshooter MCP is available for per-package CPT verification ──
 
         // ── Render ──
         const processedCards = Object.entries(processed).length
@@ -5036,32 +5022,6 @@ ${sspMisses.length ? `<div class="handover-section">
 <td style="text-align:center;font-family:monospace;color:#ff1744;font-weight:bold">${m.overdueMins}m</td>
 </tr>`).join('')}</tbody>
 </table></div></div>` : ''}
-
-${vistaMisses.length ? `<div class="handover-section">
-<h3 style="color:#ff1744">📦 Vista Missed CPT (${vistaMissTotal} containers · ${vistaMissTotalPkgs} items)
-<span style="font-size:10px;color:#8899aa;font-weight:normal">CPT + 30min passed, not loaded</span>
-</h3>
-${vistaMisses.map(r => `<div style="margin-bottom:10px">
-<div style="font-size:11px;font-weight:bold;color:#ff9900;margin-bottom:4px;display:flex;align-items:center;gap:8px">
-→ ${r.route} <span style="color:#ff1744;font-size:10px">${r.totalContainers} cnt · ${r.totalPkgs} ${pkgUnit(r.route)}</span>
-</div>
-<div style="overflow-x:auto;border:1px solid rgba(255,23,68,0.2);border-radius:6px">
-<table class="handover-loc-table">
-<thead><tr><th>Route</th><th>Container</th><th>Type</th><th>Location</th><th>State</th><th style="text-align:center">Pkg</th><th style="text-align:center">Overdue</th></tr></thead>
-<tbody>${r.containers.map(c => {
-    const dwC2 = c.overdueMins > 120 ? '#ff1744' : c.overdueMins > 60 ? '#ff5252' : '#ff9100';
-    return `<tr style="background:rgba(255,23,68,0.03)">
-<td style="font-family:monospace;color:#e0e0e0;font-size:10px">${r.route}</td>
-<td style="font-family:monospace;font-weight:bold;color:#fff;font-size:10px">${c.containerName}</td>
-<td style="color:#8899aa;font-size:10px">${c.type}</td>
-<td style="font-family:monospace;color:#e0e0e0;font-size:10px">${c.location}</td>
-<td style="color:${c.state === 'Stacked' ? '#4fc3f7' : '#ffd600'};font-size:10px">${c.state}</td>
-<td style="text-align:center;color:#ff9900;font-weight:bold">${c.childCount}</td>
-<td style="text-align:center;font-family:monospace;color:${dwC2};font-weight:bold">${c.overdueMins}m</td>
-</tr>`;
-}).join('')}</tbody>
-</table></div></div>`).join('')}
-</div>` : ''}
 
 <div class="handover-section">
 <h3>✅ Loaded this shift</h3>
@@ -5193,15 +5153,6 @@ tr:nth-child(even){background:#fafafa}
             if (sspMisses.length) {
                 text += `🚨 SSP MISSED CPT (${sspMisses.length} loads):\n`;
                 for (const m of sspMisses) { text += `  ${m.route} | ${m.status} | Door:${m.dockDoor} | ${m.vrId} | ${m.pkgCount || '?'}pkg | ${m.overdueMins}m overdue\n`; }
-                text += '\n';
-            }
-
-            if (vistaMisses.length) {
-                text += `📦 VISTA MISSED CPT (${vistaMissTotal} cnt · ${vistaMissTotalPkgs} pkg):\n`;
-                for (const r of vistaMisses) {
-                    text += `  → ${r.route} (${r.totalContainers} cnt · ${r.totalPkgs} pkg):\n`;
-                    for (const c of r.containers) { text += `    ${c.containerName} | ${c.type} | ${c.location} | ${c.state} | ${c.childCount}pkg | ${c.overdueMins}m overdue\n`; }
-                }
                 text += '\n';
             }
 
