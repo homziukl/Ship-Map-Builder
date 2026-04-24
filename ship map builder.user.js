@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Ship Map Builder
 // @namespace    http://tampermonkey.net/
-// @version      3.5.6
+// @version      3.5.7
 // @description  Ship Map + SSP + YMS + Vista + FMC + STEM integration
 // @author       homziukl
 // @match        https://stem-eu.corp.amazon.com/url*
@@ -673,13 +673,13 @@ const SSP = {
                     swapFiltered++;
                     continue;
                 }
-                group.sort((a,b) => { const sa = a.sdt==='—'?'zzz':a.sdt, sb = b.sdt==='—'?'zzz':b.sdt; return sa.localeCompare(sb); });
+                group.sort((a,b) => { const sa = a.sdt==='—'?Infinity:new Date(a.sdt).getTime()||Infinity, sb = b.sdt==='—'?Infinity:new Date(b.sdt).getTime()||Infinity; return sa - sb; });
                 const primary = group[0], routes = [...new Set(group.map(g => g.route))], planIds = group.map(g => g.planId), dockDoors = [...new Set(group.map(g => g.dockDoor).filter(d => d !== '—'))];
                 const statusPrio = ['LOADING_IN_PROGRESS','FINISHED_LOADING','TRAILER_ATTACHED','READY_TO_DEPART','READY_FOR_LOADING','SCHEDULED','DEPARTED','COMPLETED','CANCELLED'];
                 const bestStatus = group.reduce((best, g) => { const bi = statusPrio.indexOf(best.status), gi = statusPrio.indexOf(g.status); return gi < bi && gi >= 0 ? g : best; }, primary);
                 loads.push({ ...primary, route: routes.length > 1 ? routes.join(' + ') : routes[0], status: bestStatus.status, statusLabel: SSP._statusLabel(bestStatus.status), statusShort: SSP._statusShort(bestStatus.status), statusColor: SSP._statusColor(bestStatus.status), dockDoor: dockDoors.length ? dockDoors.join('+') : '—', _swapCount: group.length, _swapPlanIds: planIds, _swapGroup: group });
             }
-            loads.sort((a, b) => { const sa = a.sdt === '—' ? 'zzz' : a.sdt, sb = b.sdt === '—' ? 'zzz' : b.sdt; const cmp = sa.localeCompare(sb); if (cmp !== 0) return cmp; return a.route.localeCompare(b.route); });
+            loads.sort((a, b) => { const sa = a.sdt === '—' ? Infinity : new Date(a.sdt).getTime() || Infinity, sb = b.sdt === '—' ? Infinity : new Date(b.sdt).getTime() || Infinity; if (sa !== sb) return sa - sb; return a.route.localeCompare(b.route); });
             State.sspLoads = loads; State.swapFilteredCount = swapFiltered; State.dataLastUpdated = new Date(); State.dataLoading = false;
 
             // ── Shift snapshot: detect cancelled loads ──
